@@ -164,14 +164,11 @@ def opt_report(prob, outfile=None):
                 driver.get_design_var_values(driver_scaling=driver_scaling)[abs_name]
 
         for abs_name, meta in prob.driver._cons.items():
-            prom_name = get_prom_name(abs_name)
+            if meta.get('alias') is not None:
+                prom_name = abs_name
+            else:
+                prom_name = get_prom_name(abs_name)
             cons_meta[prom_name] = meta
-            if 'alias' in meta and meta['alias'] is not None:
-                # check to see if the abs_name is the alias
-                if abs_name == meta['alias']:
-                    prom_name = meta['name']
-                else:
-                    raise ValueError("Absolute name of var was expected to be the alias")  # TODO ??
             cons_vals[prom_name] = \
                 driver.get_constraint_values(driver_scaling=driver_scaling)[abs_name]
 
@@ -355,8 +352,6 @@ def _make_dvcons_table(meta_dict, vals_dict, kind,
             meta['ref0'] = 0.0
 
         alias = meta.get('alias', '')
-        if alias:
-            name = meta['name']
 
         # the scipy optimizer, when using COBYLA, creates constraints under the hood.
         #  But the values are not given by the driver, so use this as a sign that this
@@ -376,8 +371,11 @@ def _make_dvcons_table(meta_dict, vals_dict, kind,
                 mean_val = np.mean(vals_dict[name])
                 row[col_name] = _indicate_value_is_derived_from_array(mean_val, vals_dict[name])
             elif col_name == 'min':
-                min_val = min(vals_dict[name])  # get min. Could be an array
-                min_val_as_str = _indicate_value_is_derived_from_array(min_val, vals_dict[name])
+                if isinstance(vals_dict[name], np.ndarray):
+                    min_val = min(vals_dict[name])  # get min. Could be an array
+                    min_val_as_str = _indicate_value_is_derived_from_array(min_val, vals_dict[name])
+                else:
+                    min_val_as_str = str(vals_dict[name])
                 comp = (vals_dict[name] - meta['lower']) < _bounds_tolerance
                 if np.any(comp):
                     row[col_name] = \
@@ -385,8 +383,11 @@ def _make_dvcons_table(meta_dict, vals_dict, kind,
                 else:
                     row[col_name] = min_val_as_str
             elif col_name == 'max':
-                max_val = max(vals_dict[name])
-                max_val_as_str = _indicate_value_is_derived_from_array(max_val, vals_dict[name])
+                if isinstance(vals_dict[name], np.ndarray):
+                    max_val = max(vals_dict[name])  # get max. Could be an array
+                    max_val_as_str = _indicate_value_is_derived_from_array(max_val, vals_dict[name])
+                else:
+                    max_val_as_str = str(vals_dict[name])
                 comp = (meta['upper'] - vals_dict[name]) < _bounds_tolerance
                 if np.any(comp):
                     row[col_name] = \

@@ -50,7 +50,7 @@ from openmdao.utils.array_utils import scatter_dist_to_local
 from openmdao.utils.reports_system import get_reports_to_activate, activate_reports, \
     clear_reports, get_reports_dir, _load_report_plugins
 from openmdao.utils.general_utils import ContainsAll, pad_name, _is_slicer_op, LocalRangeIterable, \
-    _find_dict_meta, env_truthy, add_border
+    _find_dict_meta, env_truthy, add_border, match_includes_excludes, inconsistent_across_procs
 from openmdao.utils.om_warnings import issue_warning, DerivativesWarning, warn_deprecation, \
     OMInvalidCheckDerivativesOptionsWarning
 import openmdao.utils.coloring as coloring_mod
@@ -165,9 +165,6 @@ class Problem(object):
         Derivatives calculation mode assigned by the user.  If set to 'auto', _mode will be
         automatically assigned to 'fwd' or 'rev' based on relative sizes of design variables vs.
         responses.
-    _initial_condition_cache : dict
-        Any initial conditions that are set at the problem level via setitem are cached here
-        until they can be processed.
     cite : str
         Listing of relevant citations that should be referenced when
         publishing work that uses this class.
@@ -189,8 +186,6 @@ class Problem(object):
         Problem name. If no name given, a default name of the form 'problemN', where N is an
         integer, will be given to the problem so it can be referenced in command line tools
         that have an optional problem name argument
-    _system_options_recorded : bool
-        A flag to indicate whether the system options for all the systems have been recorded
     _metadata : dict
         Problem level metadata.
     _run_counter : int
@@ -271,11 +266,8 @@ class Problem(object):
 
         self._mode = None  # mode is assigned in setup()
 
-        self._initial_condition_cache = {}
-
         self._metadata = None
         self._run_counter = -1
-        self._system_options_recorded = False
         self._rec_mgr = RecordingManager()
 
         # General options
@@ -435,55 +427,6 @@ class Problem(object):
         return abs_name in self.model._var_abs2meta['input'] or \
             abs_name in self.model._var_abs2meta['output']
 
-    def _get_cached_val(self, name, get_remote=False):
-        # We have set and cached already
-        if name in self._initial_condition_cache:
-            return self._initial_condition_cache[name]
-
-        # Vector not setup, so we need to pull values from saved metadata request.
-        else:
-            try:
-                conns = self.model._conn_abs_in2out
-            except AttributeError:
-                conns = {}
-
-            abs_names = name2abs_names(self.model, name)
-            if not abs_names:
-                raise KeyError(f'{self.model.msginfo}: Variable "{name}" not found.')
-
-            abs_name = abs_names[0]
-            vars_to_gather = self._metadata['vars_to_gather']
-
-            meta = self.model._var_abs2meta
-            io = 'output' if abs_name in meta['output'] else 'input'
-            if abs_name in meta[io]:
-                if abs_name in conns:
-                    val = meta['output'][conns[abs_name]]['val']
-                else:
-                    val = meta[io][abs_name]['val']
-            else:
-                # not found in real outputs or inputs, try discretes
-                meta = self.model._var_discrete
-                io = 'output' if abs_name in meta['output'] else 'input'
-                if abs_name in meta[io]:
-                    if abs_name in conns:
-                        val = meta['output'][conns[abs_name]]['val']
-                    else:
-                        val = meta[io][abs_name]['val']
-
-            if get_remote and abs_name in vars_to_gather:
-                owner = vars_to_gather[abs_name]
-                if self.model.comm.rank == owner:
-                    self.model.comm.bcast(val, root=owner)
-                else:
-                    val = self.model.comm.bcast(None, root=owner)
-
-            if val is not _UNDEFINED:
-                # Need to cache the "get" in case the user calls in-place numpy operations.
-                self._initial_condition_cache[name] = val
-
-            return val
-
     @property
     def _recording_iter(self):
         return self._metadata['recording_iter']
@@ -532,12 +475,16 @@ class Problem(object):
             The value of the requested output/input variable.
         """
         if self._metadata['setup_status'] == _SetupStatus.POST_SETUP:
-            val = self._get_cached_val(name, get_remote=get_remote)
-            if val is not _UNDEFINED:
-                if indices is not None:
-                    val = val[indices]
-                if units is not None:
-                    val = self.model.convert2units(name, val, simplify_unit(units))
+            abs_names = name2abs_names(self.model, name)
+            if abs_names:
+                val = self.model._get_cached_val(name, abs_names, get_remote=get_remote)
+                if val is not _UNDEFINED:
+                    if indices is not None:
+                        val = val[indices]
+                    if units is not None:
+                        val = self.model.convert2units(name, val, simplify_unit(units))
+            else:
+                raise KeyError(f'{self.model.msginfo}: Variable "{name}" not found.')
         else:
             val = self.model.get_val(name, units=units, indices=indices, get_remote=get_remote,
                                      from_src=True)
@@ -582,202 +529,36 @@ class Problem(object):
         indices : int or list of ints or tuple of ints or int ndarray or Iterable or None, optional
             Indices or slice to set to specified value.
         value : object
-            Deprecated `value` arg.
+            Deprecated `value` arg.  Use `val` instead.
         """
-        if value is not None and not self._warned:
-            self._warned = True
-            warn_deprecation(f"{self.msginfo} 'value' will be deprecated in 4.0. Please use 'val' "
-                             "in the future.")
-        if val is not None:
-            value = val
+        if value is not None:
+            val = value
+            if not self._warned:
+                self._warned = True
+                warn_deprecation(f"{self.msginfo} 'value' will be deprecated in 4.0. Please use "
+                                 "'val' in the future.")
 
-        model = self.model
-        if self._metadata is not None:
-            conns = model._conn_global_abs_in2out
-        else:
+        if self._metadata is None:
             raise RuntimeError(f"{self.msginfo}: '{name}' Cannot call set_val before setup.")
 
-        all_meta = model._var_allprocs_abs2meta
-        loc_meta = model._var_abs2meta
-        n_proms = 0  # if nonzero, name given was promoted input name w/o a matching prom output
-
-        try:
-            ginputs = model._group_inputs
-        except AttributeError:
-            ginputs = {}  # could happen if top level system is not a Group
-
-        abs_names = name2abs_names(model, name)
-        if abs_names:
-            n_proms = len(abs_names)  # for output this will never be > 1
-            if n_proms > 1 and name in ginputs:
-                abs_name = ginputs[name][0].get('use_tgt', abs_names[0])
-            else:
-                abs_name = abs_names[0]
-        else:
-            raise KeyError(f'{model.msginfo}: Variable "{name}" not found.')
-
-        if abs_name in conns:
-            src = conns[abs_name]
-            if abs_name not in model._var_allprocs_discrete['input']:
-                value = np.asarray(value)
-                tmeta = all_meta['input'][abs_name]
-                tunits = tmeta['units']
-                sunits = all_meta['output'][src]['units']
-                if abs_name in loc_meta['input']:
-                    tlocmeta = loc_meta['input'][abs_name]
-                else:
-                    tlocmeta = None
-
-                gunits = ginputs[name][0].get('units') if name in ginputs else None
-                if n_proms > 1:  # promoted input name was used
-                    if gunits is None:
-                        tunit_list = [all_meta['input'][n]['units'] for n in abs_names]
-                        tu0 = tunit_list[0]
-                        for tu in tunit_list:
-                            if tu != tu0:
-                                model._show_ambiguity_msg(name, ('units',), abs_names)
-
-                if units is None:
-                    # avoids double unit conversion
-                    if self._metadata['setup_status'] > _SetupStatus.POST_SETUP:
-                        ivalue = value
-                        if sunits is not None:
-                            if gunits is not None and gunits != tunits:
-                                value = model.convert_from_units(src, value, gunits)
-                            else:
-                                value = model.convert_from_units(src, value, tunits)
-                else:
-                    if gunits is None:
-                        ivalue = model.convert_from_units(abs_name, value, units)
-                    else:
-                        ivalue = model.convert_units(name, value, units, gunits)
-                    if self._metadata['setup_status'] == _SetupStatus.POST_SETUP:
-                        value = ivalue
-                    else:
-                        value = model.convert_from_units(src, value, units)
-        else:
-            src = abs_name
-            if units is not None:
-                value = model.convert_from_units(abs_name, value, units)
-
-        # Caching only needed if vectors aren't allocated yet.
-        if self._metadata['setup_status'] == _SetupStatus.POST_SETUP:
-            if indices is not None:
-                self._get_cached_val(name)
-                try:
-                    if _is_slicer_op(indices):
-                        self._initial_condition_cache[name] = value[indices]
-                    else:
-                        self._initial_condition_cache[name][indices] = value
-                except IndexError:
-                    self._initial_condition_cache[name][indices] = value
-                except Exception as err:
-                    raise RuntimeError(f"Failed to set value of '{name}': {str(err)}.")
-            else:
-                self._initial_condition_cache[name] = value
-        else:
-            myrank = model.comm.rank
-
-            if indices is None:
-                indices = _full_slice
-
-            if model._outputs._contains_abs(abs_name):
-                distrib = all_meta['output'][abs_name]['distributed']
-                if (distrib and indices is _full_slice and
-                        value.size == all_meta['output'][abs_name]['global_size']):
-                    # assume user is setting using full distributed value
-                    sizes = model._var_sizes['output'][:, model._var_allprocs_abs2idx[abs_name]]
-                    start = np.sum(sizes[:myrank])
-                    end = start + sizes[myrank]
-                    model._outputs.set_var(abs_name, value[start:end], indices)
-                else:
-                    model._outputs.set_var(abs_name, value, indices)
-            elif abs_name in conns:  # input name given. Set value into output
-                src_is_auto_ivc = src.startswith('_auto_ivc.')
-                # when setting auto_ivc output, error messages should refer
-                # to the promoted name used in the set_val call
-                var_name = name if src_is_auto_ivc else src
-                if model._outputs._contains_abs(src):  # src is local
-                    if (model._outputs._abs_get_val(src).size == 0 and
-                            src_is_auto_ivc and
-                            all_meta['output'][src]['distributed']):
-                        pass  # special case, auto_ivc dist var with 0 local size
-                    elif tmeta['has_src_indices']:
-                        if tlocmeta:  # target is local
-                            flat = False
-                            if name in model._var_prom2inds:
-                                sshape, inds, flat = model._var_prom2inds[name]
-                                src_indices = inds
-                            elif (tlocmeta.get('manual_connection') or
-                                  model._inputs._contains_abs(name)):
-                                src_indices = tlocmeta['src_indices']
-                            else:
-                                src_indices = None
-
-                            if src_indices is None:
-                                model._outputs.set_var(src, value, _full_slice, flat,
-                                                       var_name=var_name)
-                            else:
-                                if tmeta['distributed']:
-                                    src_indices = src_indices.shaped_array()
-                                    ssizes = model._var_sizes['output']
-                                    sidx = model._var_allprocs_abs2idx[src]
-                                    ssize = ssizes[myrank, sidx]
-                                    start = np.sum(ssizes[:myrank, sidx])
-                                    end = start + ssize
-                                    if np.any(src_indices < start) or np.any(src_indices >= end):
-                                        raise RuntimeError(f"{model.msginfo}: Can't set {name}: "
-                                                           "src_indices refer "
-                                                           "to out-of-process array entries.")
-                                    if start > 0:
-                                        src_indices = src_indices - start
-                                    src_indices = indexer(src_indices)
-                                if indices is _full_slice:
-                                    model._outputs.set_var(src, value, src_indices, flat,
-                                                           var_name=var_name)
-                                else:
-                                    model._outputs.set_var(src, value, src_indices.apply(indices),
-                                                           True, var_name=var_name)
-                        else:
-                            raise RuntimeError(f"{model.msginfo}: Can't set {abs_name}: remote"
-                                               " connected inputs with src_indices currently not"
-                                               " supported.")
-                    else:
-                        value = np.asarray(value)
-                        if indices is not _full_slice:
-                            indices = indexer(indices)
-                        model._outputs.set_var(src, value, indices, var_name=var_name)
-                elif src in model._discrete_outputs:
-                    model._discrete_outputs[src] = value
-                # also set the input
-                # TODO: maybe remove this if inputs are removed from case recording
-                if n_proms < 2:
-                    if model._inputs._contains_abs(abs_name):
-                        model._inputs.set_var(abs_name, ivalue, indices)
-                    elif abs_name in model._discrete_inputs:
-                        model._discrete_inputs[abs_name] = value
-                    else:
-                        # must be a remote var. so, just do nothing on this proc. We can't get here
-                        # unless abs_name is found in connections, so the variable must exist.
-                        if abs_name in model._var_allprocs_abs2meta:
-                            print(f"Variable '{name}' is remote on rank {self.comm.rank}.  "
-                                  "Local assignment ignored.")
-            elif abs_name in model._discrete_outputs:
-                model._discrete_outputs[abs_name] = value
-            elif model._inputs._contains_abs(abs_name):   # could happen if model is a component
-                model._inputs.set_var(abs_name, value, indices)
-            elif abs_name in model._discrete_inputs:   # could happen if model is a component
-                model._discrete_inputs[abs_name] = value
+        self.model.set_val(name, val, units=units, indices=indices)
 
     def _set_initial_conditions(self):
         """
         Set all initial conditions that have been saved in cache after setup.
         """
-        for name, value in self._initial_condition_cache.items():
-            self.set_val(name, value)
+        for value, set_units, pathname, name in self.model._initial_condition_cache.values():
+            if pathname:
+                system = self.model._get_subsystem(pathname)
+                if system is None:
+                    self.model.set_val(pathname + '.' + name, value, units=set_units)
+                else:
+                    system.set_val(name, value, units=set_units)
+            else:
+                self.model.set_val(name, value, units=set_units)
 
         # Clean up cache
-        self._initial_condition_cache = {}
+        self.model._initial_condition_cache = {}
 
     def _check_collected_errors(self):
         """
@@ -1162,6 +943,7 @@ class Problem(object):
                                      # src_indices are applied to the variable somewhere.
             'reports_dir': self.get_reports_dir(),  # directory where reports will be written
             'saved_errors': [],  # store setup errors here until after final_setup
+            'checking': False,  # True if check_totals or check_partials is running
         }
         model._setup(model_comm, mode, self._metadata)
 
@@ -1201,6 +983,12 @@ class Problem(object):
 
         if self._metadata['setup_status'] < _SetupStatus.POST_FINAL_SETUP:
             self.model._final_setup(self.comm)
+
+        # If set_solver_print is called after an initial run, in a multi-run scenario,
+        #  this part of _final_setup still needs to happen so that change takes effect
+        #  in subsequent runs
+        if self._metadata['setup_status'] >= _SetupStatus.POST_FINAL_SETUP:
+            self.model._setup_solver_print()
 
         driver._setup_driver(self)
 
@@ -1304,17 +1092,16 @@ class Problem(object):
         Returns
         -------
         dict of dicts of dicts
-            First key:
-                is the component name;
-            Second key:
-                is the (output, input) tuple of strings;
-            Third key:
-                is one of ['rel error', 'abs error', 'magnitude', 'J_fd', 'J_fwd', 'J_rev'];
-
-            For 'rel error', 'abs error', 'magnitude' the value is: A tuple containing norms for
-                forward - fd, adjoint - fd, forward - adjoint.
-            For 'J_fd', 'J_fwd', 'J_rev' the value is: A numpy array representing the computed
-                Jacobian for the three different methods of computation.
+            First key is the component name.
+            Second key is the (output, input) tuple of strings.
+            Third key is one of ['rel error', 'abs error', 'magnitude', 'J_fd', 'J_fwd', 'J_rev',
+            'rank_inconsistent'].
+            For 'rel error', 'abs error', and 'magnitude' the value is a tuple containing norms for
+            forward - fd, adjoint - fd, forward - adjoint.
+            For 'J_fd', 'J_fwd', 'J_rev' the value is a numpy array representing the computed
+            Jacobian for the three different methods of computation.
+            The boolean 'rank_inconsistent' indicates if the derivative wrt a serial variable is
+            inconsistent across MPI ranks.
         """
         if self._metadata['setup_status'] < _SetupStatus.POST_FINAL_SETUP:
             self.final_setup()
@@ -1349,23 +1136,8 @@ class Problem(object):
 
             name = comp.pathname
 
-            # Process includes
-            if includes is not None:
-                for pattern in includes:
-                    if fnmatchcase(name, pattern):
-                        break
-                else:
-                    continue
-
-            # Process excludes
-            if excludes is not None:
-                match = False
-                for pattern in excludes:
-                    if fnmatchcase(name, pattern):
-                        match = True
-                        break
-                if match:
-                    continue
+            if not match_includes_excludes(name, includes, excludes):
+                continue
 
             comps.append(comp)
 
@@ -1376,6 +1148,8 @@ class Problem(object):
         #   program errs out
         requested_method = method
         alloc_complex = model._outputs._alloc_complex
+        abs2meta_in = model._var_allprocs_abs2meta['input']
+        abs2meta_out = model._var_allprocs_abs2meta['output']
 
         for comp in comps:
             local_opts = comp._get_check_partial_options()
@@ -1453,9 +1227,6 @@ class Problem(object):
         # Directional derivative directions for matrix free comps.
         mfree_directions = {}
 
-        meta_in = model._var_allprocs_abs2meta['input']
-        meta_out = model._var_allprocs_abs2meta['output']
-
         # Analytic Jacobians
         print_reverse = False
         for mode in ('fwd', 'rev'):
@@ -1512,11 +1283,6 @@ class Problem(object):
                                 # Implicit state
                                 flat_view = dstate._abs_get_val(inp_abs)
 
-                            if inp_abs in meta_in:
-                                in_dist = meta_in[inp_abs]['distributed']
-                            else:
-                                in_dist = meta_out[inp_abs]['distributed']
-
                             if directional:
                                 n_in = 1
                                 idxs = range(1)
@@ -1534,15 +1300,6 @@ class Problem(object):
                                 idxs = LocalRangeIterable(comp, inp_abs, use_vec_offset=False)
                                 perturb = 1.0
 
-                            if not in_dist and mode == 'rev':
-                                # in rev mode, if in_dist is False that means that the 'of' var
-                                # is serial.  In cases where 'of' is serial and 'wrt' is
-                                # distributed, the component must do an internal Allreduce in
-                                # order for the total derivatives to be correct, so here we compute
-                                # a correction to undo this so we get the correct answer when
-                                # checking partials.
-                                mult = 1.0 / comp.comm.size
-
                             for idx in idxs:
 
                                 dinputs.set_val(0.0)
@@ -1554,7 +1311,11 @@ class Problem(object):
                                     flat_view[idx] = perturb
 
                                 # Matrix Vector Product
-                                comp._apply_linear(None, _contains_all, mode)
+                                self._metadata['checking'] = True
+                                try:
+                                    comp._apply_linear(None, _contains_all, mode)
+                                finally:
+                                    self._metadata['checking'] = False
 
                                 for out in out_list:
                                     out_abs = rel_name2abs_name(comp, out)
@@ -1578,14 +1339,6 @@ class Problem(object):
                                             deriv[jac_key][:, idx] = derivs
 
                                     else:  # rev
-                                        if not in_dist:
-                                            if out_abs in meta_out:
-                                                out_dist = meta_out[out_abs]['distributed']
-                                            else:
-                                                out_dist = meta_in[out_abs]['distributed']
-                                            if out_dist:
-                                                derivs *= mult
-
                                         key = inp, out
                                         deriv = partials_data[c_name][key]
 
@@ -1594,9 +1347,17 @@ class Problem(object):
                                             m = mfree_directions[c_name][out]
                                             d = mfree_directions[c_name][inp]
                                             mhat = derivs
-                                            dhat = partials_data[c_name][inp, out]['J_fwd'][:, idx]
+                                            dhat = deriv['J_fwd'][:, idx]
 
                                             deriv['directional_fwd_rev'] = mhat.dot(m) - dhat.dot(d)
+                                        else:
+                                            meta = abs2meta_in[out_abs] if out_abs in abs2meta_in \
+                                                else abs2meta_out[out_abs]
+                                            if not meta['distributed']:  # serial input or state
+                                                inc = inconsistent_across_procs(comp.comm, derivs,
+                                                                                return_array=False)
+                                                if inc:
+                                                    deriv['rank_inconsistent'] = True
 
                                         # Allocate first time
                                         if jac_key not in deriv:
@@ -1918,7 +1679,11 @@ class Problem(object):
         else:
             total_info = _TotalJacInfo(self, of, wrt, False, return_format='flat_dict',
                                        driver_scaling=driver_scaling)
-            Jcalc = total_info.compute_totals()
+            self._metadata['checking'] = True
+            try:
+                Jcalc = total_info.compute_totals()
+            finally:
+                self._metadata['checking'] = False
 
         if step is None:
             if method == 'cs':
@@ -1941,12 +1706,12 @@ class Problem(object):
 
         model.approx_totals(method=method, step=step, form=form,
                             step_calc=step_calc if method == 'fd' else None)
-        total_info = _TotalJacInfo(self, of, wrt, False, return_format='flat_dict', approx=True,
-                                   driver_scaling=driver_scaling)
+        fd_tot_info = _TotalJacInfo(self, of, wrt, False, return_format='flat_dict', approx=True,
+                                    driver_scaling=driver_scaling)
         if show_progress:
-            Jfd = total_info.compute_totals_approx(initialize=True, progress_out_stream=out_stream)
+            Jfd = fd_tot_info.compute_totals_approx(initialize=True, progress_out_stream=out_stream)
         else:
-            Jfd = total_info.compute_totals_approx(initialize=True)
+            Jfd = fd_tot_info.compute_totals_approx(initialize=True)
 
         # reset the _owns_approx_jac flag after approximation is complete.
         if not approx:
@@ -1972,7 +1737,7 @@ class Problem(object):
             out_stream = sys.stdout
 
         _assemble_derivative_data(data, rel_err_tol, abs_err_tol, out_stream, compact_print,
-                                  [model], {'': fd_args}, totals=True, lcons=lcons,
+                                  [model], {'': fd_args}, totals=total_info, lcons=lcons,
                                   show_only_incorrect=show_only_incorrect)
         return data['']
 
@@ -2396,8 +2161,8 @@ def _compute_deriv_errors(derivative_info, matrix_free, directional, totals):
         True if the current dirivatives are computed in a matrix free manner.
     directional : bool
         True if the current dirivtives are directional.
-    totals : bool
-        True if the current derivatives are total derivatives.
+    totals : bool or _TotalJacInfo
+        _TotalJacInfo if the current derivatives are total derivatives.
 
     Returns
     -------
@@ -2498,16 +2263,19 @@ def _errors_above_tol(deriv_info, abs_error_tol, rel_error_tol):
     return above_abs, above_rel
 
 
-def _iter_derivs(derivatives, sys_name, show_only_incorrect, global_options, totals,
-                 matrix_free, abs_error_tol, rel_error_tol):
+def _iter_derivs(system, derivatives, sys_name, show_only_incorrect, global_options, totals,
+                 matrix_free, abs_error_tol=1e-6, rel_error_tol=1e-6, incon_keys=()):
     """
     Iterate over all of the derivatives.
 
     If show_only_incorrect is True, only the derivatives with abs or rel errors outside of
-    tolerance will be returned.
+    tolerance or derivatives wrt serial variables that are inconsistent across ranks will be
+    returned.
 
     Parameters
     ----------
+    system : System
+        Active system.
     derivatives : dict
         Dict of metadata for derivative groups, keyed on (of, wrt) pairs.
     sys_name : str
@@ -2516,14 +2284,16 @@ def _iter_derivs(derivatives, sys_name, show_only_incorrect, global_options, tot
         If True, yield only derivatives with errors outside of tolerance.
     global_options : dict
         Dictionary containing the options for the approximation.
-    totals : bool
-        Set to True if we are doing check_totals to skip a bunch of stuff.
+    totals : bool or _TotalJacInfo
+        Set to _TotalJacInfo if we are doing check_totals to skip a bunch of stuff.
     matrix_free : bool
         True if the system computes matrix free derivatives.
     abs_error_tol : float
         Absolute error tolerance.
     rel_error_tol : float
         Relative error tolerance.
+    incon_keys : set or tuple
+        Keys where there are serial d_inputs variables that are inconsistent across processes.
 
     Yields
     ------
@@ -2539,28 +2309,36 @@ def _iter_derivs(derivatives, sys_name, show_only_incorrect, global_options, tot
         True if the differences for the current derivatives are above the absolute error tolerance.
     bool
         True if the differences for the current derivatives are above the relative error tolerance.
+    bool
+        True if the current derivative was computed where some serial d_inputs variables were not
+        consistent across processes.
     """
     # Sorted keys ensures deterministic ordering
     sorted_keys = sorted(derivatives)
 
     for key in sorted_keys:
         of, wrt = key
+
+        inconsistent = False
         derivative_info = derivatives[key]
 
         if totals:
             fd_opts = global_options['']
         else:
             fd_opts = global_options[sys_name][wrt]
-        directional = fd_opts.get('directional')
+            if key in incon_keys:
+                inconsistent = True
+
+        directional = bool(fd_opts) and fd_opts.get('directional')
 
         fd_norm = _compute_deriv_errors(derivative_info, matrix_free, directional, totals)
 
         above_abs, above_rel = _errors_above_tol(derivative_info, abs_error_tol, rel_error_tol)
 
-        if show_only_incorrect and not (above_abs or above_rel):
+        if show_only_incorrect and not (above_abs or above_rel or inconsistent):
             continue
 
-        yield key, fd_norm, fd_opts, directional, above_abs, above_rel
+        yield key, fd_norm, fd_opts, directional, above_abs, above_rel, inconsistent
 
 
 def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out_stream,
@@ -2587,8 +2365,8 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
         The systems (in the proper order) that were checked.
     global_options : dict
         Dictionary containing the options for the approximation.
-    totals : bool
-        Set to True if we are doing check_totals to skip a bunch of stuff.
+    totals : bool or _TotalJacInfo
+        Set to _TotalJacInfo if we are doing check_totals to skip a bunch of stuff.
     indep_key : dict of sets, optional
         Keyed by component name, contains the of/wrt keys that are declared not dependent.
     print_reverse : bool, optional
@@ -2618,6 +2396,7 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
 
     worst_subjac_rel_err = 0.0
     worst_subjac = None
+    incon_keys = ()
 
     for system in system_list:
 
@@ -2642,6 +2421,8 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
 
         if totals:
             sys_name = 'Full Model'
+
+        incon_keys = system._get_inconsistent_keys()
 
         num_bad_jacs = 0  # Keep track of number of bad derivative values for each component
 
@@ -2707,10 +2488,10 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
                 out_buffer.write(header + '\n')
                 out_buffer.write('-' * len(header) + '\n\n')
 
-        for key, fd_norm, fd_opts, directional, above_abs, above_rel in \
-                _iter_derivs(derivatives, sys_name, show_only_incorrect,
+        for key, fd_norm, fd_opts, directional, above_abs, above_rel, inconsistent in \
+                _iter_derivs(system, derivatives, sys_name, show_only_incorrect,
                              global_options, totals, matrix_free,
-                             abs_error_tol, rel_error_tol):
+                             abs_error_tol, rel_error_tol, incon_keys):
 
             # Skip printing the non-dependent keys if the derivatives are fine.
             if not compact_print:
@@ -2724,7 +2505,7 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
             do_rev = not totals and matrix_free and not directional
             do_rev_dp = not totals and matrix_free and directional
 
-            if above_abs or above_rel:
+            if above_abs or above_rel or inconsistent:
                 num_bad_jacs += 1
 
             # Informative output for responses that were declared with an index.
@@ -2800,6 +2581,8 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
                         out_buffer.write(' >ABS_TOL')
                     if above_rel:
                         out_buffer.write(' >REL_TOL')
+                    if inconsistent:
+                        out_buffer.write(' <RANK INCONSISTENT>')
                     out_buffer.write('\n')
 
                 else:  # not compact print
@@ -2872,8 +2655,11 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
 
                         out_buffer.write(f'    Relative Error {desc}: {error_str}\n')
 
+                    if inconsistent:
+                        out_buffer.write('\n    * Inconsistent value across ranks *\n')
+
                     if MPI and MPI.COMM_WORLD.size > 1:
-                        out_buffer.write(f'    MPI Rank {MPI.COMM_WORLD.rank}\n')
+                        out_buffer.write(f'\n    MPI Rank {MPI.COMM_WORLD.rank}\n')
                     out_buffer.write('\n')
 
                     # Raw Derivatives
@@ -2885,14 +2671,12 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
                         else:
                             out_buffer.write('    Raw Analytic')
                         out_buffer.write(' Derivative (Jfor)\n')
-                    out_buffer.write(str(forward) + '\n')
-                    out_buffer.write('\n')
+                    out_buffer.write(str(forward) + '\n\n')
 
                     if not totals and matrix_free and not directional:
                         reverse = derivative_info.get('J_rev')
                         out_buffer.write('    Raw Reverse Derivative (Jrev)\n')
-                        out_buffer.write(str(reverse) + '\n')
-                        out_buffer.write('\n')
+                        out_buffer.write(str(reverse) + '\n\n')
 
                     try:
                         fd = derivative_info['J_fd']
@@ -2900,9 +2684,11 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
                         fd = 0.
 
                     if directional:
-                        out_buffer.write(f'    Directional FD Derivative (Jfd)\n{fd}\n')
+                        out_buffer.write(f"    Directional {fd_opts['method'].upper()}"
+                                         " Derivative (J{fd_opts['method']})\n{fd}\n")
                     else:
-                        out_buffer.write(f'    Raw FD Derivative (Jfd)\n{fd}\n')
+                        out_buffer.write(f"    Raw {fd_opts['method'].upper()}"
+                                         " Derivative (J{fd_opts['method']})\n{fd}\n")
 
                     out_buffer.write(' -' * 30 + '\n')
 
@@ -2916,14 +2702,34 @@ def _assemble_derivative_data(derivative_data, rel_error_tol, abs_error_tol, out
 
     # End of for system in system_list
 
-    if not suppress_output and compact_print and not totals:
-        if worst_subjac:
+    if not suppress_output:
+        if compact_print and not totals and worst_subjac:
             _, class_name, name = worst_subjac
             worst_header = f"Sub Jacobian with Largest Relative Error: {class_name} '{name}'"
             print(f"\n{add_border(worst_header, '#')}\n", file=out_stream)
             print(header, file=out_stream)
             print('-' * len(header), file=out_stream)
             print(worst_subjac_line, file=out_stream)
+
+    if incon_keys:
+        # stick incon_keys into the first key's dict in order to avoid breaking existing code
+        for key, dct in derivative_data['' if totals else sys_name].items():
+            dct['inconsistent_keys'] = incon_keys
+            break
+        if not suppress_output:
+            if totals:
+                msgstart = "During computation of totals, the "
+            else:
+                msgstart = "The "
+            ders = [f"{sof} wrt {swrt}" for sof, swrt in sorted(incon_keys)]
+            print(f"\n{msgstart}following partial derivatives resulted in\n"
+                  "inconsistent values across processes for certain serial inputs:\n"
+                  f"{ders}.\nThis can happen if a component 'compute_jacvec_product' "
+                  "or 'apply_linear'\nmethod does not properly reduce the value of a distributed "
+                  "output when computing the\nderivative of that output with respect to a serial "
+                  "input.  Try reverting back to OpenMDAO 3.24 \nwhich used a different convention "
+                  "when transferring data between distributed and non-distributed \nvariables "
+                  "within a matrix free component. See POEM 75 for details.")
 
 
 def _format_if_not_matrix_free(matrix_free, val):

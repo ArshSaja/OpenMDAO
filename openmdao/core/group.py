@@ -469,6 +469,7 @@ class Group(System):
         for n, lst in self._group_inputs.items():
             self._group_inputs[n] = lst.copy()
 
+        self.matrix_free = False
         for subsys in self._subsystems_myproc:
             subsys._configure()
             subsys._setup_var_data()
@@ -992,7 +993,6 @@ class Group(System):
 
         self._has_distrib_vars = False
         abs_in2prom_info = self._problem_meta['abs_in2prom_info']
-        self._promotes_src_indices = {}
 
         for subsys in self._subsystems_myproc:
             self._has_output_scaling |= subsys._has_output_scaling
@@ -1166,6 +1166,9 @@ class Group(System):
         self._auto_ivc_warnings = []
 
         for prom, metalist in self._group_inputs.items():
+            if prom not in prom2abs_in:
+                # this error was already collected in setup_var_data, so just continue here
+                continue
             try:
                 paths = [(i, m['path']) for i, m in enumerate(metalist) if not m['auto']]
                 top_origin = paths[0][1]
@@ -1839,9 +1842,6 @@ class Group(System):
 
         Also, check shapes of connected variables.
         """
-        # clean up promotion maps since we don't need them any more
-        self._promotes_src_indices = None
-
         abs_in2out = self._conn_abs_in2out = {}
         self._conn_discrete_in2out = {}
         global_abs_in2out = self._conn_global_abs_in2out
@@ -2504,17 +2504,17 @@ class Group(System):
         System or None
             System if found else None.
         """
-        if name == '':
-            return self
-
         system = self
         for subname in name.split('.'):
-            if subname in system._subsystems_allprocs:
+            try:
                 system = system._subsystems_allprocs[subname].system
-            elif subname in system._static_subsystems_allprocs:
-                system = system._static_subsystems_allprocs[subname].system
-            else:
-                return None
+            except KeyError:
+                try:
+                    system = system._static_subsystems_allprocs[subname].system
+                except KeyError:
+                    if name == '':
+                        return self
+                    return None
         return system
 
     def _apply_nonlinear(self):

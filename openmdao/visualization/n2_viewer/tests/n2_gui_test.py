@@ -116,7 +116,7 @@ n2_gui_test_scripts = {
             "desc": "Hover on an N2 cell with cycle arrows and count",
             "test": "hoverArrow",
             "selector": "#cellShape_conn_33_to_13",
-            "arrowCount": 6
+            "arrowCount": 4
         },
         {
             "desc": "Left-click on partition tree element to zoom",
@@ -573,20 +573,14 @@ n2_gui_test_scripts = {
             "selector": "#p1_A",
         },
         {
-            "desc": "Click p1.A to make Node Info window persistent",
-            "test": "click",
-            "selector": "#p1_A",
-            "button": "left"
-        },
-        {
-            "desc": "Hover to bring up Node Info window for p2.b",
+            "desc": "Hover to bring up Node Info window for lingrp.lin.x",
             "test": "hover",
-            "selector": "#p2_b",
+            "selector": "#lingrp_lin_x",
         },
         {
-            "desc": "Click p2.b to make Node Info window persistent",
+            "desc": "Click lingrp.lin.x to make Node Info window persistent",
             "test": "click",
-            "selector": "#p2_b",
+            "selector": "#lingrp_lin_x",
             "button": "left"
         },
         {
@@ -601,32 +595,16 @@ n2_gui_test_scripts = {
             "button": "left"
         },
         {
-            "desc": "Hover to bring up Node Info window for lingrp.lin.b",
-            "test": "hover",
-            "selector": "#lingrp_lin_b",
-        },
-        {
-            "desc": "Click lingrp.lin.b to make Node Info window persistent",
+            "desc": "Click p1.A to make Node Info window persistent",
             "test": "click",
-            "selector": "#lingrp_lin_b",
+            "selector": "#p1_A",
             "button": "left"
         },
         {
-            "desc": "Hover to bring up Node Info window for lingrp.lin.x",
-            "test": "hover",
-            "selector": "#lingrp_lin_x",
-        },
-        {
-            "desc": "Click lingrp.lin.x to make Node Info window persistent",
-            "test": "click",
-            "selector": "#lingrp_lin_x",
-            "button": "left"
-        },
-        {
-            "desc": "Check for 5 open persistent Node Info windows",
+            "desc": "Check for 3 open persistent Node Info windows",
             "test": "count",
             "selector": "[id^='persistentNodeInfo']",
-            "count": 5
+            "count": 3
         },
         {
             "desc": "Close All Node Info windows",

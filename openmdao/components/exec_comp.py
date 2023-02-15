@@ -16,6 +16,8 @@ from openmdao.utils.units import valid_units
 from openmdao.utils import cs_safe
 from openmdao.utils.om_warnings import issue_warning, DerivativesWarning, warn_deprecation, \
     SetupWarning
+from openmdao.utils.array_utils import get_random_arr
+
 
 # regex to check for variable names.
 VAR_RGX = re.compile(r'([.]*[_a-zA-Z]\w*[ ]*\(?)')
@@ -28,9 +30,6 @@ _allowed_meta = {'value', 'val', 'shape', 'units', 'res_units', 'desc',
 # Names that are not allowed for input or output variables (keywords for options)
 _disallowed_names = {'has_diag_partials', 'units', 'shape', 'shape_by_conn', 'run_root_only',
                      'constant', 'do_coloring'}
-
-
-_randgen = np.random.default_rng()
 
 
 def check_option(option, value):
@@ -98,12 +97,6 @@ class ExecComp(ExplicitComponent):
         List of code objects.
     _exprs_info : list
         List of tuples containing output and inputs for each expression.
-    _has_diag_partials : bool
-        If True, treat all array/array partials as diagonal if both arrays have size > 1.
-        All arrays with size > 1 must have the same flattened size or an exception will be raised.
-    _units : str or None
-        Units to be assigned to all variables in this component.
-        Default is None, which means units are provided for variables individually.
     complex_stepsize : double
         Step size used for complex step which is used for derivatives.
     _manual_decl_partials : bool
@@ -986,7 +979,7 @@ class ExecComp(ExplicitComponent):
         jac = _ColSparsityJac(self, info)
 
         for i in range(info['num_full_jacs']):
-            inarr[:] = starting_inputs + in_offsets * _randgen.random(in_offsets.size)
+            inarr[:] = starting_inputs + in_offsets * get_random_arr(in_offsets.size, self.comm)
 
             for i in range(inarr.size):
                 inarr[i] += step

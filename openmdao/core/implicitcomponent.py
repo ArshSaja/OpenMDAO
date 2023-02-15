@@ -12,7 +12,6 @@ from openmdao.utils.general_utils import format_as_float_or_array
 from openmdao.utils.units import simplify_unit
 
 
-_inst_functs = ['apply_linear', 'solve_nonlinear']
 _full_slice = slice(None)
 
 
@@ -53,10 +52,11 @@ class ImplicitComponent(Component):
 
     Attributes
     ----------
-    _inst_functs : dict
-        Dictionary of names mapped to bound methods.
     _declared_residuals : dict
         Contains local residual names mapped to metadata.
+    _has_solve_nl : bool
+        If True, this component has a solve_nonlinear method that overrides the ImplicitComponent
+        class method.
     """
 
     def __init__(self, **kwargs):
@@ -65,8 +65,7 @@ class ImplicitComponent(Component):
         """
         self._declared_residuals = {}
         super().__init__(**kwargs)
-
-        self._inst_functs = {name: getattr(self, name, None) for name in _inst_functs}
+        self._has_solve_nl = _UNDEFINED
 
     def _configure(self):
         """
@@ -76,15 +75,14 @@ class ImplicitComponent(Component):
         """
         self._has_guess = overrides_method('guess_nonlinear', self, ImplicitComponent)
 
-        solve_nl = getattr(self, 'solve_nonlinear')
-        self._has_solve_nl = (overrides_method('solve_nonlinear', self, ImplicitComponent) or
-                              solve_nl != self._inst_functs['solve_nonlinear'])
+        if self._has_solve_nl is _UNDEFINED:
+            self._has_solve_nl = overrides_method('solve_nonlinear', self, ImplicitComponent)
 
-        new_apply_linear = getattr(self, 'apply_linear', None)
+        if self.matrix_free is _UNDEFINED:
+            self.matrix_free = overrides_method('apply_linear', self, ImplicitComponent)
 
-        self.matrix_free = (overrides_method('apply_linear', self, ImplicitComponent) or
-                            (new_apply_linear is not None and
-                             self._inst_functs['apply_linear'] != new_apply_linear))
+        if self.matrix_free:
+            self._check_matfree_deprecation()
 
     def _apply_nonlinear(self):
         """
@@ -208,7 +206,15 @@ class ImplicitComponent(Component):
                     d_inputs.set_val(new_ins)
                     d_outputs.set_val(new_outs)
         else:
+            dochk = mode == 'rev' and self._problem_meta['checking'] and self.comm.size > 1
+
+            if dochk:
+                nzdresids = self._get_dist_nz_dresids()
+
             self.apply_linear(inputs, outputs, d_inputs, d_outputs, d_residuals, mode)
+
+            if dochk:
+                self._check_consistent_serial_dinputs(nzdresids)
 
     def _apply_linear(self, jac, rel_systems, mode, scope_out=None, scope_in=None):
         """
@@ -789,17 +795,6 @@ class ImplicitComponent(Component):
             List of all states.
         """
         return self._list_states()
-
-    def has_declared_resids(self):
-        """
-        Return True if this System has declared residuals.
-
-        Returns
-        -------
-        bool
-            True if this System has declared residuals.
-        """
-        return len(self._declared_residuals) > 0
 
 
 def meta2range_iter(meta_dict, names=None, shp_name='shape'):
