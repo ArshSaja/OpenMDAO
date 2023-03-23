@@ -26,8 +26,7 @@ from openmdao.components.matrix_vector_product_comp import MatrixVectorProductCo
 from openmdao.components.meta_model_structured_comp import MetaModelStructuredComp
 from openmdao.components.meta_model_unstructured_comp import MetaModelUnStructuredComp
 from openmdao.components.spline_comp import SplineComp
-from openmdao.components.multifi_meta_model_unstructured_comp \
-    import MultiFiMetaModelUnStructuredComp
+from openmdao.components.multifi_meta_model_unstructured_comp import MultiFiMetaModelUnStructuredComp
 from openmdao.components.mux_comp import MuxComp
 from openmdao.components.vector_magnitude_comp import VectorMagnitudeComp
 
@@ -35,6 +34,7 @@ from openmdao.components.vector_magnitude_comp import VectorMagnitudeComp
 # Solvers
 from openmdao.solvers.linear.linear_block_gs import LinearBlockGS
 from openmdao.solvers.linear.linear_block_jac import LinearBlockJac
+from openmdao.solvers.nonlinear.nonlinear_schur import SchurSolver
 from openmdao.solvers.linear.direct import DirectSolver
 from openmdao.solvers.linear.petsc_ksp import PETScKrylov
 from openmdao.solvers.linear.linear_runonce import LinearRunOnce
@@ -45,6 +45,7 @@ from openmdao.solvers.linesearch.backtracking import BoundsEnforceLS
 from openmdao.solvers.nonlinear.broyden import BroydenSolver
 from openmdao.solvers.nonlinear.nonlinear_block_gs import NonlinearBlockGS
 from openmdao.solvers.nonlinear.nonlinear_block_jac import NonlinearBlockJac
+from openmdao.solvers.linear.linear_schur import LinearSchur
 from openmdao.solvers.nonlinear.newton import NewtonSolver
 from openmdao.solvers.nonlinear.nonlinear_runonce import NonlinearRunOnce
 
@@ -53,8 +54,7 @@ from openmdao.surrogate_models.kriging import KrigingSurrogate
 from openmdao.surrogate_models.multifi_cokriging import MultiFiCoKrigingSurrogate
 from openmdao.surrogate_models.nearest_neighbor import NearestNeighbor
 from openmdao.surrogate_models.response_surface import ResponseSurface
-from openmdao.surrogate_models.surrogate_model import SurrogateModel, \
-    MultiFiSurrogateModel
+from openmdao.surrogate_models.surrogate_model import SurrogateModel, MultiFiSurrogateModel
 
 from openmdao.utils.indexer import slicer
 from openmdao.utils.find_cite import print_citations
@@ -64,6 +64,7 @@ from openmdao.utils.spline_distributions import node_centered
 
 # Vectors
 from openmdao.vectors.default_vector import DefaultVector
+
 try:
     from openmdao.vectors.petsc_vector import PETScVector
 except ImportError:
@@ -75,9 +76,16 @@ from openmdao.drivers.scipy_optimizer import ScipyOptimizeDriver
 from openmdao.drivers.genetic_algorithm_driver import SimpleGADriver
 from openmdao.drivers.differential_evolution_driver import DifferentialEvolutionDriver
 from openmdao.drivers.doe_driver import DOEDriver
-from openmdao.drivers.doe_generators import ListGenerator, CSVGenerator, UniformGenerator, \
-    FullFactorialGenerator, PlackettBurmanGenerator, BoxBehnkenGenerator, LatinHypercubeGenerator, \
-    GeneralizedSubsetGenerator
+from openmdao.drivers.doe_generators import (
+    ListGenerator,
+    CSVGenerator,
+    UniformGenerator,
+    FullFactorialGenerator,
+    PlackettBurmanGenerator,
+    BoxBehnkenGenerator,
+    LatinHypercubeGenerator,
+    GeneralizedSubsetGenerator,
+)
 
 # System-Building Tools
 from openmdao.utils.options_dictionary import OptionsDictionary
@@ -98,22 +106,38 @@ from openmdao.utils.notebook_utils import notebook_mode, display_source, show_op
 from openmdao.utils.units import convert_units, unit_conversion
 
 # Warning Options
-from openmdao.utils.om_warnings import issue_warning, reset_warnings, OpenMDAOWarning, \
-    SetupWarning, DistributedComponentWarning, CaseRecorderWarning,\
-    DriverWarning, CacheWarning, PromotionWarning, UnusedOptionWarning, DerivativesWarning, \
-    MPIWarning, UnitsWarning, SolverWarning, OMDeprecationWarning, \
-    OMInvalidCheckDerivativesOptionsWarning
+from openmdao.utils.om_warnings import (
+    issue_warning,
+    reset_warnings,
+    OpenMDAOWarning,
+    SetupWarning,
+    DistributedComponentWarning,
+    CaseRecorderWarning,
+    DriverWarning,
+    CacheWarning,
+    PromotionWarning,
+    UnusedOptionWarning,
+    DerivativesWarning,
+    MPIWarning,
+    UnitsWarning,
+    SolverWarning,
+    OMDeprecationWarning,
+    OMInvalidCheckDerivativesOptionsWarning,
+)
 
 
 from openmdao.utils.general_utils import wing_dbg
 
 # set up tracing or memory profiling if env vars are set.
 import os
-if os.environ.get('OPENMDAO_TRACE'):
+
+if os.environ.get("OPENMDAO_TRACE"):
     from openmdao.devtools.itrace import setup, start
-    setup(os.environ['OPENMDAO_TRACE'])
+
+    setup(os.environ["OPENMDAO_TRACE"])
     start()
-elif os.environ.get('OPENMDAO_PROF_MEM'):
+elif os.environ.get("OPENMDAO_PROF_MEM"):
     from openmdao.devtools.iprof_mem import setup, start
-    setup(os.environ['OPENMDAO_PROF_MEM'])
+
+    setup(os.environ["OPENMDAO_PROF_MEM"])
     start()

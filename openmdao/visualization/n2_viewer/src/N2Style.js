@@ -275,6 +275,7 @@ N2Style.solverStyleData = [
     ['LN: Direct', null, '#80b1d3'],
     ['LN: PETScKrylov', null, '#fdb462'],
     ['LN: LNBGS', 'NL: NLBGS', '#b3de69'],
+    ['LN: SCHUR',       'NL: SCHUR',       '#fccde5'],
     ['LN: USER', null, '#fccde5'],
     [null, 'NL: Newton', '#d9d9d9'],
     [null, 'BROYDEN', '#bc80bd'],
