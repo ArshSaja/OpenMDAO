@@ -339,7 +339,7 @@ class SchurSolver(NonlinearSolver):
 
                 # we get the C[{ii},:] vector by apply_linear on the system
                 scope_out, scope_in = system._get_scope()
-                system._apply_linear(None, ContainsAll(), mode, scope_out, scope_in)
+                system._apply_linear(None, None, mode, scope_out, scope_in)
 
                 # do a solve_linear to find C[{ii},:] A^-1
                 subsys1._solve_linear(mode, ContainsAll())
@@ -349,7 +349,7 @@ class SchurSolver(NonlinearSolver):
 
                 # do a apply_linear on the subsys1 to find the D[{ii},:] - C[{ii},:] A^-1 B
                 scope_out, scope_in = system._get_scope(subsys1)
-                subsys1._apply_linear(None, ContainsAll(), mode, scope_out, scope_in)
+                subsys1._apply_linear(None, None, mode, scope_out, scope_in)
 
                 system._transfer("linear", mode, subsys2.name)
 
