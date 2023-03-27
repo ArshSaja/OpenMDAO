@@ -28,7 +28,7 @@ class SchurSolver(NonlinearSolver):
 
     SOLVER = "NL: SCHUR"
 
-    def __init__(self, mode_nonlinear="rev", groupNames=["group1", "group2"], **kwargs):
+    def __init__(self, mode_nonlinear="rev", groupNames=["group1", "group2"], bounds=None, **kwargs):
         """
         Initialize all attributes.
 
@@ -39,6 +39,7 @@ class SchurSolver(NonlinearSolver):
         """
         self._mode_nonlinear = mode_nonlinear
         self._groupNames = groupNames
+        self._bounds = bounds
         super().__init__(**kwargs)
 
         # Slot for linear solver
@@ -387,6 +388,18 @@ class SchurSolver(NonlinearSolver):
         # loop over the variables just to be safe with the ordering
         for ii, var in enumerate(vars_to_solve):
             system._outputs[f"{subsys2.name}.{var}"] += d_subsys2[ii]
+
+        if self._bounds is not None:
+            for key in self._bounds.keys():
+                if key == "lower":
+                    lowerB = self._bounds["lower"]
+                elif key == "upper":
+                    upperB = self._bounds["upper"]
+            for ii, var in enumerate(vars_to_solve):
+                if system._outputs[f"{subsys2.name}.{var}"] < lowerB[ii]:
+                    system._outputs[f"{subsys2.name}.{var}"] = lowerB[ii]
+                elif system._outputs[f"{subsys2.name}.{var}"] > upperB[ii]:
+                    system._outputs[f"{subsys2.name}.{var}"] = upperB[ii]
 
         self._solver_info.pop()
 
