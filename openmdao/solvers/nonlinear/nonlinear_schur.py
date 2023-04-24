@@ -291,7 +291,7 @@ class SchurSolver(NonlinearSolver):
                 # run the jac-vec computation in the first subsystem, this ll give us the B[:,{ii}] vector
                 scope_out, scope_in = system._get_scope(subsys1)
 
-                subsys1._apply_linear(None, ["linear"], mode, scope_out, scope_in)
+                subsys1._apply_linear(None, None, mode, scope_out, scope_in)
 
                 # amd then, by performing solve_linear we get A^-1 B[:,{ii}]
                 subsys1._solve_linear(mode, ContainsAll())
@@ -312,7 +312,7 @@ class SchurSolver(NonlinearSolver):
                 # run the apply linear. we do it on the complete system here
                 # the result is the final jacobian for this using the schur complement method D[:,{ii}] - C A^-1 B[:,{ii}]
                 scope_out, scope_in = system._get_scope()
-                system._apply_linear(None, ["linear"], mode, scope_out, scope_in)
+                system._apply_linear(None, None, mode, scope_out, scope_in)
 
                 # put this value into the jacobian.
                 schur_jac[:, ii] = subsys2._vectors["residual"]["linear"].asarray()
