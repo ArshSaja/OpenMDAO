@@ -38,19 +38,20 @@ class OmStyle extends Style {
     * LS: BCHK
     */
     static solverStyleData = [
-     // [linear,            non-Linear,        color    ]
-        ['None',            'None',            '#8dd3c7'],
-        ['LN: LNBJ',        'NL: NLBJ',        '#ffffb3'],
-        ['LN: SCIPY',       null,              '#bebada'],
-        ['LN: RUNONCE',     'NL: RUNONCE',     '#fb8072'],
-        ['LN: Direct',      null,              '#80b1d3'],
-        ['LN: PETScKrylov', null,              '#fdb462'],
-        ['LN: LNBGS',       'NL: NLBGS',       '#b3de69'],
-        ['LN: USER',        null,              '#fccde5'],
-        [null,              'NL: Newton',      '#d9d9d9'],
-        [null,              'NL: BROYDEN',     '#bc80bd'],
-        ['solve_linear',    'solve_nonlinear', '#ccebc5'],
-        ['other',           'other',           '#ffed6f'],
+        // [linear,            non-Linear,        color    ]
+        ['None', 'None', '#8dd3c7'],
+        ['LN: LNBJ', 'NL: NLBJ', '#ffffb3'],
+        ['LN: SCIPY', null, '#bebada'],
+        ['LN: RUNONCE', 'NL: RUNONCE', '#fb8072'],
+        ['LN: Direct', null, '#80b1d3'],
+        ['LN: PETScKrylov', null, '#fdb462'],
+        ['LN: LNBGS', 'NL: NLBGS', '#b3de69'],
+        ['LN: USER', null, '#fccde5'],
+        [null, 'NL: Newton', '#d9d9d9'],
+        [null, 'NL: PINL', 'springgreen'],
+        [null, 'NL: BROYDEN', '#bc80bd'],
+        ['solve_linear', 'solve_nonlinear', '#ccebc5'],
+        ['other', 'other', '#ffed6f'],
     ];
 
     /** The solverStyleData array is split into objects with keys 'ln', 'nl', and 'color' */
@@ -140,7 +141,7 @@ class OmStyle extends Style {
             OmCssJson[`g.${solver.class} > rect`] = solver.style;
         }
 
-        return {...newCssJson, ...OmCssJson};
+        return { ...newCssJson, ...OmCssJson };
     }
 
     /**
@@ -151,8 +152,8 @@ class OmStyle extends Style {
      * @return {string} The CSS class of the solver, or for "other" if not found.
      */
     getSolverClass(solverNames) {
-        const solverName = OmTreeNode.showLinearSolverNames? solverNames.linear : solverNames.nonLinear;
-        return this.solvers[solverName]? this.solvers[solverName].class : this.solvers.other.class;
+        const solverName = OmTreeNode.showLinearSolverNames ? solverNames.linear : solverNames.nonLinear;
+        return this.solvers[solverName] ? this.solvers[solverName].class : this.solvers.other.class;
     }
 
     /**
