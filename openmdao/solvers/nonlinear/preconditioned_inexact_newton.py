@@ -53,6 +53,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         # Slot for linesearch
         self.supports['linesearch'] = True
+        self._preconditioned = False
         self._linesearch = BoundsEnforceLS()
 
     def _declare_options(self):
@@ -63,7 +64,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         self.options.declare('solve_subsystems', types=bool,
                              desc='Set to True to turn on sub-solvers (Hybrid Newton).')
-        self.options.declare('max_sub_solves', types=int, default=10,
+        self.options.declare('max_sub_solves', types=int, default=50,
                              desc='Maximum number of subsystem solves.')
         self.options.declare('number_of_inexact_newton_steps', types=int, default=5,
                              desc='Maximum number of subsystem solves.')
@@ -189,6 +190,9 @@ class PreconditionedInexactNewton(NonlinearSolver):
         float
             error at the first iteration.
         """
+        self._cache_residual_counter = 0
+        self._cache_output_counter = 0
+        
         system = self._system()
         solve_subsystems = self.options['solve_subsystems'] and not system.under_complex_step
 
@@ -272,11 +276,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 norm = self._iter_get_norm()
                 self.abs0 = norm
 
-    def _single_iteration(self):
+    def _train_for_PIN(self):
         """
-        Perform the operations in the iteration loop.
+        This function train the nonlinear system for getting the reduce subspace
         """
-
         atol = self.options['atol']
         rtol = self.options['rtol']
 
@@ -284,15 +287,18 @@ class PreconditionedInexactNewton(NonlinearSolver):
         system = self._system()
         n_rows = len(system._residuals.asarray(copy=True))
         n_cols = self.options['number_of_inexact_newton_steps']
-        self._cache_residuals = np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype)
+        self._cache_residuals = np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
         # IN cache outputs
-        self._cache_states = np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype)
+        self._cache_states =  np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
         QS_p = np.zeros((n_rows, 1), dtype=system._vectors["output"]["linear"].asarray(copy=True).dtype)
         ### Step 1 ###
 
         # run inexact newton steps for training
-        iter = 0
-        while iter<self.options['number_of_inexact_newton_steps']:
+        # iter = 0
+        if self._iter_count<self.options['number_of_inexact_newton_steps']:
+
+            if system.comm.rank==0 and self._iter_count==0:
+                print("Starting training PINewton")
 
             self._inexact_newton_iteration()
 
@@ -313,7 +319,24 @@ class PreconditionedInexactNewton(NonlinearSolver):
             if abs_IN < atol or rel_IN < rtol:
                 return 0
             
-            iter = iter + 1
+            # iter = iter + 1
+            if self._iter_count==self.options['number_of_inexact_newton_steps']-1:
+                self._trained_PIN = True
+                if system.comm.rank==0:
+                    print("Ending training PINewton")
+
+    def _single_iteration(self):
+        """
+        Perform the operations in the iteration loop.
+        """
+
+        rtol = self.options['precond_rtol']
+
+        # First, we run the solver sequentially
+        # Call the training function
+        if not self._trained_PIN:
+            self._train_for_PIN()
+            return None
         
         # self._cache_residuals = np.ndarray(self._cache_residuals)
         # self._cache_states = np.ndarray(self._cache_states)
@@ -356,15 +379,20 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
             # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
             init_residual = self._cache_residuals[:,0]
-            init_states = system._outputs.asarray()
-            projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
+            init_states = system._outputs
+            projected_approx_residual_init = PTP.dot(init_residual-mean_residuals) + mean_residuals
+            if not self._preconditioned:
+                self.projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
+                self._preconditioned = True
 
-            while np.linalg.norm(projected_approx_residual) > rtol*np.linalg.norm(init_residual):
+            # converge the reduce nonlinear space
+            iter=0
+            while np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['maxiter']:
                 # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
-                projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
+                # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
                 
                 # dimension reduced vector
-                dimension_reduced_residual = self._p_residual.transpose().dot(projected_approx_residual)
+                dimension_reduced_residual = self._p_residual.transpose().dot(self.projected_approx_residual)
 
                 # compute the projected jacobian
                 # matrix = self.linear_solver._assembled_jac
@@ -378,7 +406,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 self._linearize()
                 my_asm_jac = system._linear_solver._assembled_jac._int_mtx._matrix
                 if my_asm_jac is not None:
-                    print("1")
                     if isinstance(my_asm_jac, csc_matrix):
                         jac_lup = my_asm_jac.todense()
                     elif isinstance(my_asm_jac, np.ndarray):
@@ -391,49 +418,45 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 # P_tranpose_Jac =p_residual_csc.multiply(my_asm_jac)
                 # Jp = P^T x Jac x Q
                 Jac_p = np.matmul( p_residual_csc, self._p_states)
-                # solve the subspace linear system: Sp
+
+ 
                 Sub_sol = np.linalg.solve(Jac_p, -dimension_reduced_residual)
-                print(Sub_sol)
+                # system._dresiduals.set_vec(np.asarray(dimension_reduced_residual))
+               
+                # print(Sub_sol)
                 # Y(i+1) = Y(i) + QSp
-                # QS_p[:] = self._p_states.dot(Sub_sol)
-                # print(QS_p)
-                init_states = init_states + self._p_states.dot(Sub_sol)
-
-                self._solver_info.pop()
-
+                system._outputs += self._p_states.transpose().dot(Sub_sol)
+                # self._solver_info.pop()
+                # system._outputs.set_vec(init_states)
                 # Hybrid newton support.
                 if do_subsolve:
                     with Recording('Newton_subsolve', 0, self):
                         self._solver_info.append_solver()
                         self._gs_iter()
                         self._solver_info.pop()
-
+                
                 self._run_apply()
 
                 init_residual = system._residuals.asarray()
+                # system._dresiduals.set_vec(system._residuals)
+                self.projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
 
-            print("Done")
-            quit()
+                iter = iter + 1
 
+                if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['maxiter']:
+                    if system.comm.rank==0:
+                        print("PInewton preconditioned converged")
+                        self._preconditioned=True
+                elif np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['maxiter']:
+                    if system.comm.rank==0:
+                        print("PInewton preconditioned did not converged")
+                        msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
+                    f"{iter} iterations.")
+                        self.report_failure(msg)
 
+            # run the inexact newton
+            self._inexact_newton_iteration()
 
-            # PIN ends
-            self.linear_solver.solve('fwd')
-
-            if self.linesearch and not system.under_complex_step:
-                self.linesearch._do_subsolve = do_subsolve
-                self.linesearch.solve()
-            else:
-                system._outputs += system._doutputs
-
-            self._solver_info.pop()
-
-            # Hybrid newton support.
-            if do_subsolve:
-                with Recording('Newton_subsolve', 0, self):
-                    self._solver_info.append_solver()
-                    self._gs_iter()
-                    self._solver_info.pop()
         finally:
             # Enable local fd
             system._owns_approx_jac = approx_status
@@ -493,14 +516,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
         """
         system = self._system()
         
-        if system.comm.rank==0:
-            print("sys resd before run_apply :" , system._residuals)
-
-        self._run_apply()
-
-        if system.comm.rank==0:
-            print("sys resd after run_apply :" , system._residuals)
-        
         self._cache_residuals[:,self._cache_residual_counter]=system._residuals.asarray(copy=True)
         self._cache_residual_counter =self._cache_residual_counter + 1
 
@@ -510,9 +525,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
         """
 
         system = self._system()
-
-        if system.comm.rank==0:
-            print("sys states:" , system._outputs)
         
         self._cache_states[:,self._cache_output_counter]=system._outputs.asarray(copy=True)
         self._cache_output_counter =self._cache_output_counter+ 1
@@ -543,9 +555,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
         """
         This function minimizes the variance and compute the low frequncey subspace of the nonlinear system
         """
-
+        system = self._system()
 
         # svd on residuals
+
         mean_residuals = self.compute_means(self._cache_residuals)
         mean_centered_residuals = self.compute_centered_solution(self._cache_residuals,mean_residuals)
         self._p_residual, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
@@ -554,93 +567,5 @@ class PreconditionedInexactNewton(NonlinearSolver):
         mean_states = self.compute_means(self._cache_states)
         mean_centered_states = self.compute_centered_solution(self._cache_states,mean_states)
         self._p_states, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
-    
-    # def project_nonlinear_system(self, initial_residual, rtol=1e-5):
-    #     """
-    #     This function project the true nonlinear system to a new preconditioned system
-    #     """
-    #     system = self._system()
 
-    #     # resdiual subspace projector
-    #     mean_residuals = self.compute_means(self._cache_residuals)
-    #     projected_approx_residual = np.matmul(self._p_residual, self._p_residual.transpose())*(initial_residual-mean_residuals) + mean_residuals
-
-    #     if np.linalg.norm(projected_approx_residual) <= rtol*np.linalg.norm(initial_residual):
-    #         return None
-    #     else:
-    #         # dimension reduced vector
-    #         dimension_reduced_residual = self._p_residual.transpose().dot(projected_approx_residual)
-
-    #         # compute the projected jacobian
-    #         matrix = self._assembled_jac._int_mtx._matrix
-    #         jac_p = np.matmul( self._p_residual.transpose(), matrix)
-
-
-
-
-def format_singular_error(system, matrix):
-    """
-    Format a coherent error message for any ill-conditioned mmatrix.
-
-    Parameters
-    ----------
-    system : <System>
-        System containing the Directsolver.
-    matrix : ndarray
-        Matrix of interest.
-
-    Returns
-    -------
-    str
-        New error string.
-    """
-    if scipy.sparse.issparse(matrix):
-        matrix = matrix.toarray()
-
-    if np.any(np.isnan(matrix)):
-        # There is a nan in the matrix.
-        return format_nan_error(system, matrix)
-
-    zero_rows = np.where(~matrix.any(axis=1))[0]
-    zero_cols = np.where(~matrix.any(axis=0))[0]
-    if zero_cols.size <= zero_rows.size:
-
-        if zero_rows.size == 0:
-            # In this case, some row is a linear combination of the other rows.
-
-            # SVD gives us some information that may help locate the source of the problem.
-            try:
-                u, _, _ = np.linalg.svd(matrix)
-
-            except Exception as err:
-                msg = f"Jacobian in '{system.pathname}' is not full rank, but OpenMDAO was " + \
-                    "not able to determine which rows or columns."
-                return msg
-
-            # Nonzero elements in the left singular vector show the rows that contribute strongly to
-            # the singular subspace. Note that sometimes extra rows/cols are included in the set,
-            # currently don't have a good way to pare them down.
-            tol = 1e-15
-            u_sing = np.abs(u[:, -1])
-            left_idx = np.where(u_sing > tol)[0]
-
-            msg = "Jacobian in '{}' is not full rank. The following set of states/residuals " + \
-                  "contains one or more equations that is a linear combination of the others: \n"
-
-            for loc in left_idx:
-                name = index_to_varname(system, loc)
-                msg += ' ' + name + '\n'
-
-            if len(left_idx) > 2:
-                msg += "Note that the problem may be in a single Component."
-
-            return msg.format(system.pathname)
-
-        loc_txt = "row"
-        loc = zero_rows[0]
-    else:
-        loc_txt = "column"
-        loc = zero_cols[0]
-
-    return loc_to_error_msg(system, loc_txt, loc)
 

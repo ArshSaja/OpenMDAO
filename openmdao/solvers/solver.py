@@ -590,6 +590,7 @@ class NonlinearSolver(Solver):
         self._output_cache = None
         self._prev_fail = False
         self._restarted = False
+        self._trained_PIN = False
 
     def _declare_options(self):
         """
@@ -775,6 +776,8 @@ class NonlinearSolver(Solver):
 
             self._mpi_print(self._iter_count, norm, norm / norm0)
 
+        if self.SOLVER=="NL: PINewton":
+            self._preconditioned = False
         # flag for the print statements. we only print on root if USE_PROC_FILES is not set to True
         print_flag = system.comm.rank == 0 or os.environ.get('USE_PROC_FILES')
 
