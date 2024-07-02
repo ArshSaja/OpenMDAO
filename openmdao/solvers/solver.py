@@ -745,7 +745,7 @@ class NonlinearSolver(Solver):
                            f"here: \n{pathname}nonlinear_solver.linesearch.options"
                            "['print_bound_enforce']=True. \nThe bound(s) being violated now "
                            "are:\n")
-                    issue_warning(msg, category=SolverWarning)
+                    # issue_warning(msg, category=SolverWarning)
 
                     self._single_iteration()
                     self.linesearch.options['print_bound_enforce'] = False
