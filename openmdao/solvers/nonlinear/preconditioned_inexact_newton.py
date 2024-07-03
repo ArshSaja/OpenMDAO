@@ -5,7 +5,7 @@ import numpy as np
 
 from scipy.sparse import csc_matrix 
 from openmdao.matrices.dense_matrix import DenseMatrix
-from openmdao.solvers.linesearch.backtracking import BoundsEnforceLS
+from openmdao.solvers.linesearch.backtracking import BoundsEnforceLS, ArmijoGoldsteinLS
 from openmdao.solvers.solver import NonlinearSolver
 from openmdao.recorders.recording_iteration_stack import Recording
 from openmdao.utils.mpi import MPI
@@ -55,7 +55,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self.supports['linesearch'] = True
         self._preconditioned = False
         self._linesearch = BoundsEnforceLS()
-        self._linesearchPrecond = BoundsEnforceLS()
+        self.linesearchPrecond = BoundsEnforceLS()
+        self.linesearchPrecondBound = BoundsEnforceLS()
 
     def _declare_options(self):
         """
@@ -67,10 +68,16 @@ class PreconditionedInexactNewton(NonlinearSolver):
                              desc='Set to True to turn on sub-solvers (Hybrid Newton).')
         self.options.declare('max_sub_solves', types=int, default=50,
                              desc='Maximum number of subsystem solves.')
-        self.options.declare('number_of_inexact_newton_steps', types=int, default=5,
-                             desc='Maximum number of subsystem solves.')
-        self.options.declare('precond_rtol', default=1e-2,
+        self.options.declare('precond_max_sub_solves', types=int, default=10,
+                             desc='Maximum number of precondition solves.')
+        self.options.declare('number_of_training_newton_steps', types=int, default=5,
+                             desc='Maximum number of training iterations of inexacat newton.')
+        self.options.declare('precond_rtol', default=1e-3,
                              desc='relative error tolerance for the preconditioned stage')
+        self.options.declare('linesearchprecondition_systems', default='all',
+                    desc="which subsystem needs robust linesearch in preconditioning.")
+        self.options.declare('precondlinesearch_robust_tol', default=1e-1,
+                    desc="Method to calculate stopping condition.")
         self.options.declare('cs_reconverge', types=bool, default=True,
                              desc='When True, when this driver solves under a complex step, nudge '
                              'the Solution vector by a small amount so that it reconverges.')
@@ -105,7 +112,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.linear_solver._setup_solvers(system, self._depth + 1)
         else:
             self.linear_solver = system.linear_solver
-        self._linesearchPrecond._setup_solvers(system, self._depth + 1)
+        self.linesearchPrecond._setup_solvers(system, self._depth + 1)
+        self.linesearchPrecondBound._setup_solvers(system, self._depth + 1)
         if self.linesearch is not None:
             self.linesearch._setup_solvers(system, self._depth + 1)
 
@@ -134,7 +142,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         if self.linear_solver is not None and type_ != 'NL':
             self.linear_solver._set_solver_print(level=level, type_=type_)
-        self._linesearchPrecond._set_solver_print(level=level, type_=type_)
+        self.linesearchPrecond._set_solver_print(level=level, type_=type_)
+        self.linesearchPrecondBound._set_solver_print(level=level, type_=type_)
         if self.linesearch is not None:
             self.linesearch._set_solver_print(level=level, type_=type_)
 
@@ -167,6 +176,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
         bool
             Flag for indicating child linerization
         """
+
+        system = self._system()
         return (self.options['solve_subsystems'] and not system.under_complex_step
                 and self._iter_count <= self.options['max_sub_solves'])
 
@@ -176,7 +187,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
         """
         if self.linear_solver is not None:
             self.linear_solver._linearize()
-        self._linesearchPrecond._linearize()
+        self.linesearchPrecond._linearize()
+        self.linesearchPrecondBound._linearize()
         if self.linesearch is not None:
             self.linesearch._linearize()
 
@@ -195,12 +207,15 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self._cache_output_counter = 0
 
         self._preconditioned = False
-        
+        self._trained_PIN = False
+
         system = self._system()
         solve_subsystems = self.options['solve_subsystems'] and not system.under_complex_step
 
+        
+
         n_rows = len(system._residuals.asarray(copy=True))
-        n_cols = self.options['number_of_inexact_newton_steps']
+        n_cols = self.options['number_of_training_newton_steps']
         self._cache_residuals = np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
         # IN cache outputs
         self._cache_states =  np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
@@ -300,7 +315,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         # run inexact newton steps for training
         # iter = 0
-        if self._iter_count<self.options['number_of_inexact_newton_steps']:
+        if self._iter_count<self.options['number_of_training_newton_steps']:
 
             if system.comm.rank==0 and self._iter_count==0:
                 print("Starting training PINewton")
@@ -325,7 +340,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 return 0
             
             # iter = iter + 1
-            if self._iter_count==self.options['number_of_inexact_newton_steps']-1:
+            if self._iter_count==self.options['number_of_training_newton_steps']-1:
                 self._trained_PIN = True
                 if system.comm.rank==0:
                     print("Ending training PINewton")
@@ -341,6 +356,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         
         # First, we run the solver sequentially
         # Call the training function
+        print("training : ", self._trained_PIN)
         if not self._trained_PIN:
             self._train_for_PIN()
             return None
@@ -395,7 +411,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
             # converge the reduce nonlinear space
             iter=0
-            while np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['maxiter']:
+            while np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
                 # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
                 # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
                 
@@ -435,13 +451,23 @@ class PreconditionedInexactNewton(NonlinearSolver):
                
                 # print(Sub_sol)
                 # Y(i+1) = Y(i) + QSp
-                if self.linesearch and not system.under_complex_step:
+                if self.linesearchPrecond and not system.under_complex_step:
                     system._doutputs.set_val(0)
                     system._doutputs += self._p_states.dot(Sub_sol)
-                    self._linesearchPrecond._do_subsolve = do_subsolve
-                    # BoundsEnforceLS.solve()
-                    # self.linesearch._enforce_bounds(step=system._doutputs, alpha=1.0)
-                    self._linesearchPrecond.solve()
+                    # if self.options['linesearchprecondition_systems']=="all":
+                    #     self.linesearchPrecond._do_subsolve = do_subsolve
+                    #     self.linesearchPrecond.solve()
+                    # elif system.pathname not in self.options['linesearchprecondition_systems']:
+                    #     self.linesearchPrecondBound._do_subsolve = do_subsolve
+                    #     self.linesearchPrecondBound.solve()
+
+                    if np.linalg.norm(self.projected_approx_residual) > self.options['precondlinesearch_robust_tol']*np.linalg.norm(projected_approx_residual_init) and iter >0:
+                        self.linesearchPrecond._do_subsolve = do_subsolve
+                        self.linesearchPrecond.solve()
+                    else:
+                        self.linesearchPrecondBound._do_subsolve = do_subsolve
+                        self.linesearchPrecondBound.solve()
+                        
                 else:
                     system._outputs += self._p_states.dot(Sub_sol)
                  
@@ -461,11 +487,11 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 self.projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
 
                 iter = iter + 1
-                if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['maxiter']:
+                if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
                     if system.comm.rank==0:
                         print("PInewton preconditioned converged")
                         self._preconditioned=True
-                elif np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['maxiter']:
+                elif np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
                     if system.comm.rank==0:
                         print("PInewton preconditioned did not converged")
                         msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
