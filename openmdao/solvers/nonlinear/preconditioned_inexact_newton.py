@@ -56,7 +56,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self._preconditioned = False
         self._linesearch = BoundsEnforceLS()
         self.linesearchPrecond = BoundsEnforceLS()
-        self.linesearchPrecondBound = BoundsEnforceLS()
+        self.linesearchPrecondSubLevel = BoundsEnforceLS()
 
     def _declare_options(self):
         """
@@ -70,10 +70,16 @@ class PreconditionedInexactNewton(NonlinearSolver):
                              desc='Maximum number of subsystem solves.')
         self.options.declare('precond_max_sub_solves', types=int, default=10,
                              desc='Maximum number of precondition solves.')
+        self.options.declare('precond_max_subprecond_solves', types=int, default=5,
+                             desc='Maximum number of precondition solves.')
         self.options.declare('number_of_training_newton_steps', types=int, default=5,
+                             desc='Maximum number of training iterations of inexacat newton.')
+        self.options.declare('number_of_training_precond_steps', types=int, default=3,
                              desc='Maximum number of training iterations of inexacat newton.')
         self.options.declare('precond_rtol', default=1e-3,
                              desc='relative error tolerance for the preconditioned stage')
+        self.options.declare('solve_subprecond', types=bool,default=False,
+                             desc='Set to True to turn on sub-solvers (Hybrid Newton).')
         self.options.declare('linesearchprecondition_systems', default='all',
                     desc="which subsystem needs robust linesearch in preconditioning.")
         self.options.declare('precondlinesearch_robust_tol', default=1e-1,
@@ -114,8 +120,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.linear_solver = system.linear_solver
         if self.linesearchPrecond is not None:
             self.linesearchPrecond._setup_solvers(system, self._depth + 1)
-        if self.linesearchPrecondBound is not None:
-            self.linesearchPrecondBound._setup_solvers(system, self._depth + 1)
+        if self.linesearchPrecondSubLevel is not None:
+            self.linesearchPrecondSubLevel._setup_solvers(system, self._depth + 1)
         if self.linesearch is not None:
             self.linesearch._setup_solvers(system, self._depth + 1)
 
@@ -146,8 +152,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.linear_solver._set_solver_print(level=level, type_=type_)
         if self.linesearchPrecond is not None:
             self.linesearchPrecond._set_solver_print(level=level, type_=type_)
-        if self.linesearchPrecondBound is not None:
-            self.linesearchPrecondBound._set_solver_print(level=level, type_=type_)
+        if self.linesearchPrecondSubLevel is not None:
+            self.linesearchPrecondSubLevel._set_solver_print(level=level, type_=type_)
         if self.linesearch is not None:
             self.linesearch._set_solver_print(level=level, type_=type_)
 
@@ -193,8 +199,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.linear_solver._linearize()
         if self.linesearchPrecond is not None:
             self.linesearchPrecond._linearize()
-        if self.linesearchPrecondBound is not None:
-            self.linesearchPrecondBound._linearize()
+        if self.linesearchPrecondSubLevel is not None:
+            self.linesearchPrecondSubLevel._linearize()
         if self.linesearch is not None:
             self.linesearch._linearize()
 
@@ -212,8 +218,16 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self._cache_residual_counter = 0
         self._cache_output_counter = 0
 
+        self._iter_count_precond = 0
+
+        self._cache_residual_counter_precond = 0
+        self._cache_output_counter_precond = 0
+
         self._preconditioned = False
         self._trained_PIN = False
+
+        self._preconditioned_precond = False
+        self._trained_PIN_precond = False
 
         system = self._system()
         solve_subsystems = self.options['solve_subsystems'] and not system.under_complex_step
@@ -222,9 +236,14 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         n_rows = len(system._residuals.asarray(copy=True))
         n_cols = self.options['number_of_training_newton_steps']
+        n_cols_precond = self.options['number_of_training_precond_steps']
         self._cache_residuals = np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
         # IN cache outputs
         self._cache_states =  np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
+
+        self._cache_residuals_precond = np.asarray(np.zeros((n_rows, n_cols_precond), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
+        # IN cache outputs
+        self._cache_states_precond =  np.asarray(np.zeros((n_rows, n_cols_precond), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
 
 
         if self.options['debug_print']:
@@ -351,6 +370,52 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 if system.comm.rank==0:
                     print(self.SOLVER +" Ending training ")
 
+
+    def _train_for_PIN_precond(self, dim_red_resid, dim_red_states):
+        """
+        This function train the nonlinear system for getting the reduce subspace
+        """
+        atol = self.options['atol']
+        rtol = self.options['rtol']
+
+        # IN cache residual
+        system = self._system()
+
+        ### Step 1 ###
+
+        # run inexact newton steps for training
+        # iter = 0
+        if self._iter_count_precond<self.options['number_of_training_precond_steps']:
+
+            if system.comm.rank==0 and self._iter_count_precond==0:
+                print(" " + self.SOLVER +" starting precond training ")
+
+            # self._inexact_newton_iteration()
+
+            # compute the residuals
+            # self._run_apply()
+
+            # cahce the resd for training
+            self.cache_residuals_pin_precond(dim_red_resid)
+            # cahce the outp for training
+            self.cache_states_pin_precond(dim_red_states)
+            
+            # compute the norm and see if the system has already converged
+            norm = self._iter_get_norm()
+
+            abs_IN = norm
+            rel_IN = norm / self.abs0 if self.abs0 != 0.0 else 1.0
+
+            if abs_IN < atol or rel_IN < rtol:
+                return 0
+            
+            
+            if self._iter_count_precond==self.options['number_of_training_precond_steps']-1:
+                self._trained_PIN_precond = True
+                if system.comm.rank==0:
+                    print(" " + self.SOLVER +" ending precond training ")
+            self._iter_count_precond = self._iter_count_precond + 1
+
     def _single_iteration(self):
         """
         Perform the operations in the iteration loop.
@@ -401,130 +466,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
 
                 ### Step 2 ###
-
-                # compute mean residual from the IN
-                mean_residuals = self.compute_means(self._cache_residuals)
-
-                # P^TP
-                PTP= np.matmul(self._p_residual, self._p_residual.transpose())
-
-                # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
-                init_residual = self._cache_residuals[:,-1]
-                init_states = system._outputs
-                projected_approx_residual_init = PTP.dot(init_residual-mean_residuals) + mean_residuals
-
-                
-                self.projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
-                # self._preconditioned = True
-
-                # converge the reduce nonlinear space
-                iter=0
-                while np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
-                    # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
-                    # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
-                    
-                    if iter==0 and system.comm.rank==0:
-                        print(self.SOLVER +" Starting preconditioning")
-                    # dimension reduced vector
-                    dimension_reduced_residual = self._p_residual.transpose().dot(self.projected_approx_residual)
-
-                    # compute the projected jacobian
-                    # matrix = self.linear_solver._assembled_jac
-                    my_asm_jac = system.linear_solver._assembled_jac
-
-                    system._linearize(my_asm_jac, sub_do_ln=do_sub_ln)
-                    if (my_asm_jac is not None and
-                            system.linear_solver._assembled_jac is not my_asm_jac):
-                        my_asm_jac._update(system)
-
-                    self._linearize()
-                    my_asm_jac = system._linear_solver._assembled_jac._int_mtx._matrix
-                    if my_asm_jac is not None:
-                        if isinstance(my_asm_jac, csc_matrix):
-                            jac_lup = my_asm_jac.todense()
-                        elif isinstance(my_asm_jac, np.ndarray):
-                            jac_lup = my_asm_jac
-                    else:
-                        jac_lup = system.linear_solver._build_mtx()
-                
-                    # P^T x Jac
-                    p_residual_csc = np.matmul(self._p_residual.transpose(),jac_lup)
-                    # P_tranpose_Jac =p_residual_csc.multiply(my_asm_jac)
-                    # Jp = P^T x Jac x Q
-                    Jac_p = np.matmul( p_residual_csc, self._p_states)
-
-    
-                    Sub_sol = np.linalg.solve(Jac_p, -dimension_reduced_residual)
-                    # system._dresiduals.set_vec(np.asarray(dimension_reduced_residual))
-                
-                    # print(Sub_sol)
-                    # Y(i+1) = Y(i) + QSp
-                    # if self.linesearchPrecond and not system.under_complex_step:
-                    #     system._doutputs.set_val(0)
-                    #     system._doutputs += self._p_states.dot(Sub_sol)
-                    #     # if self.options['linesearchprecondition_systems']=="all":
-                    #     #     self.linesearchPrecond._do_subsolve = do_subsolve
-                    #     #     self.linesearchPrecond.solve()
-                    #     # elif system.pathname not in self.options['linesearchprecondition_systems']:
-                    #     #     self.linesearchPrecondBound._do_subsolve = do_subsolve
-                    #     #     self.linesearchPrecondBound.solve()
-
-                    #     if np.linalg.norm(self.projected_approx_residual) > self.options['precondlinesearch_robust_tol']*np.linalg.norm(projected_approx_residual_init) and iter >0:
-                    #         self.linesearchPrecond._do_subsolve = do_subsolve
-                    #         self.linesearchPrecond.solve()
-                    #     else:
-                    #         self.linesearchPrecondBound._do_subsolve = do_subsolve
-                    #         self.linesearchPrecondBound.solve()
-                            
-                    # else:
-                    #     system._outputs += self._p_states.dot(Sub_sol)
-
-                    if self.linesearchPrecond and not system.under_complex_step:
-                        system._doutputs.set_val(0)
-                        system._doutputs += self._p_states.dot(Sub_sol)
-                        # if self.options['linesearchprecondition_systems']=="all":
-                        #     self.linesearchPrecond._do_subsolve = do_subsolve
-                        #     self.linesearchPrecond.solve()
-                        # elif system.pathname not in self.options['linesearchprecondition_systems']:
-                        #     self.linesearchPrecondBound._do_subsolve = do_subsolve
-                        #     self.linesearchPrecondBound.solve()
-
-                        if np.linalg.norm(self.projected_approx_residual) > self.options['precondlinesearch_robust_tol']*np.linalg.norm(projected_approx_residual_init):
-
-                            self.linesearchPrecond._do_subsolve = do_subsolve
-                            self.linesearchPrecond.solve()
-                            
-                    else:
-                        system._outputs += self._p_states.dot(Sub_sol)
-                    
-                    # self._solver_info.pop()
-                    # system._outputs.set_vec(init_states)
-                    # Hybrid newton support.
-                    if do_subsolve:
-                        with Recording('Newton_subsolve', 0, self):
-                            # self._solver_info.append_solver()
-                            self._gs_iter()
-                            # self._solver_info.pop()
-                    
-                    self._run_apply()
-
-                    init_residual = system._residuals.asarray()
-                    # system._dresiduals.set_vec(system._residuals)
-                    self.projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
-
-                    
-                    if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
-                        if system.comm.rank==0:
-                            print(self.SOLVER +" preconditioned converged")
-                            
-                    elif np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
-                        if system.comm.rank==0:
-                            print(self.SOLVER +" preconditioned did not converged")
-                            msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
-                        f"{iter} iterations.")
-                            self.report_failure(msg)
-                    self._preconditioned=True
-                    iter = iter + 1
+                # call the precondition convergence
+                self._preconditioning_iter()
             
             # run the inexact newton
             self._inexact_newton_iteration()
@@ -533,7 +476,277 @@ class PreconditionedInexactNewton(NonlinearSolver):
             # Enable local fd
             system._owns_approx_jac = approx_status
         
+    
+    def _preconditioning_iter(self):
+        rtol = self.options['precond_rtol']
+        system = self._system()
+        # self._solver_info.append_subsolver()
+        do_subsolve = self.options['solve_subsystems'] and not system.under_complex_step and \
+            (self._iter_count < self.options['max_sub_solves'])
+        do_sub_ln = self.linear_solver._linearize_children()
+
+        # Disable local fd
+        approx_status = system._owns_approx_jac
+        system._owns_approx_jac = False
+
+        # compute mean residual from the IN
+        mean_residuals = self.compute_means(self._cache_residuals)
+
+        # P^TP
+        self.PTP= np.matmul(self._p_residual, self._p_residual.transpose())
+
+        # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
+        init_residual = self._cache_residuals[:,-1]
+        init_states = system._outputs
+        projected_approx_residual_init = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+
         
+        self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+        # self._preconditioned = True
+
+        # converge the reduce nonlinear space
+        iter=0
+        while np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
+            # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
+            # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
+            
+            if iter==0 and system.comm.rank==0:
+                print(self.SOLVER +" Starting preconditioning")
+            # dimension reduced vector
+
+            
+
+            dimension_reduced_residual = self._p_residual.transpose().dot(self.projected_approx_residual)
+
+
+            # compute the projected jacobian
+            # matrix = self.linear_solver._assembled_jac
+            my_asm_jac = system.linear_solver._assembled_jac
+
+            system._linearize(my_asm_jac, sub_do_ln=do_sub_ln)
+            if (my_asm_jac is not None and
+                    system.linear_solver._assembled_jac is not my_asm_jac):
+                my_asm_jac._update(system)
+
+            self._linearize()
+            my_asm_jac = system._linear_solver._assembled_jac._int_mtx._matrix
+            if my_asm_jac is not None:
+                if isinstance(my_asm_jac, csc_matrix):
+                    jac_lup = my_asm_jac.todense()
+                elif isinstance(my_asm_jac, np.ndarray):
+                    jac_lup = my_asm_jac
+            else:
+                jac_lup = system.linear_solver._build_mtx()
+        
+            # P^T x Jac
+            p_residual_csc = np.matmul(self._p_residual.transpose(),jac_lup)
+            # P_tranpose_Jac =p_residual_csc.multiply(my_asm_jac)
+            # Jp = P^T x Jac x Q
+            Jac_p = np.matmul( p_residual_csc, self._p_states)
+
+
+            Sub_sol = np.linalg.solve(Jac_p, -dimension_reduced_residual)
+            # system._dresiduals.set_vec(np.asarray(dimension_reduced_residual))
+
+            
+        
+            if self.linesearchPrecond and not system.under_complex_step:
+                system._doutputs.set_val(0)
+                system._doutputs += self._p_states.dot(Sub_sol)
+                # if self.options['linesearchprecondition_systems']=="all":
+                #     self.linesearchPrecond._do_subsolve = do_subsolve
+                #     self.linesearchPrecond.solve()
+                # elif system.pathname not in self.options['linesearchprecondition_systems']:
+                #     self.linesearchPrecondSubLevel._do_subsolve = do_subsolve
+                #     self.linesearchPrecondSubLevel.solve()
+
+                if np.linalg.norm(self.projected_approx_residual) > self.options['precondlinesearch_robust_tol']*np.linalg.norm(projected_approx_residual_init):
+
+                    self.linesearchPrecond._do_subsolve = do_subsolve
+                    self.linesearchPrecond.solve()
+                    
+            else:
+                system._outputs += self._p_states.dot(Sub_sol)
+
+            
+            
+
+            # self._solver_info.pop()
+            # system._outputs.set_vec(init_states)
+            # Hybrid newton support.
+            if do_subsolve:
+                with Recording('Newton_subsolve', 0, self):
+                    # self._solver_info.append_solver()
+                    self._gs_iter()
+                    # self._solver_info.pop()
+            
+            self._run_apply()
+
+            init_residual = system._residuals.asarray()
+            # system._dresiduals.set_vec(system._residuals)
+            self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+
+            # Call the training function
+            if not self._trained_PIN_precond and self.options['solve_subprecond']:
+                self._train_for_PIN_precond(self.projected_approx_residual, system._outputs.asarray(copy=True))
+                # return None
+
+            if not self._preconditioned_precond and self._trained_PIN_precond and self.options['solve_subprecond']:
+                # compute P and Q projectors
+                self.minimize_variance_precond()
+                self._preconditioning_sub_iter()
+            
+            if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
+                if system.comm.rank==0:
+                    print(self.SOLVER +" preconditioned converged")
+                    
+            elif np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
+                if system.comm.rank==0:
+                    print(self.SOLVER +" preconditioned did not converged")
+                    msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
+                f"{iter} iterations.")
+                    self.report_failure(msg)
+            self._preconditioned=True
+            iter = iter + 1
+
+    def _preconditioning_sub_iter(self):
+        rtol = self.options['precond_rtol']
+        system = self._system()
+        # self._solver_info.append_subsolver()
+        do_subsolve = self.options['solve_subsystems'] and not system.under_complex_step and \
+            (self._iter_count < self.options['max_sub_solves'])
+        do_sub_ln = self.linear_solver._linearize_children()
+
+        # Disable local fd
+        approx_status = system._owns_approx_jac
+        system._owns_approx_jac = False
+
+        # compute mean residual from the IN
+        mean_residuals = self.compute_means(self._cache_residuals)
+        mean_residuals_precond = self.compute_means(self._cache_residuals_precond)
+
+        # P^TP
+        PTPcond= np.matmul(self._p_residual_precond, self._p_residual_precond.transpose())
+
+        # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
+        init_residual = self._cache_residuals_precond[:,-1]
+        # mean_residuals_precond = self.compute_means(self._cache_residuals_precond)
+
+        # init_residual = system._residuals.asarray(copy=True)
+        # mean_residuals = self.compute_means(self._cache_residuals)
+        init_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+        # mean_residuals = self.compute_means(self._cache_residuals_precond)
+        # # system._dresiduals.set_vec(system._residuals)
+        projected_approx_residual_init = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
+        self.projected_approx_residual_precond = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
+        
+        # self.projected_approx_residual_precond = PTP.dot(init_residual-mean_residuals) + mean_residuals
+        # self._preconditioned = True
+
+        # converge the reduce nonlinear space
+        iter=0
+        while np.linalg.norm(self.projected_approx_residual_precond) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
+            # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
+            # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
+            
+            if iter==0 and system.comm.rank==0:
+                print(" " + self.SOLVER +" starting sublevel preconditioning")
+            # dimension reduced vector
+
+            
+
+            dimension_reduced_residual = self._p_residual_precond.transpose().dot(self.projected_approx_residual_precond)
+
+            # compute the projected jacobian
+            # matrix = self.linear_solver._assembled_jac
+            my_asm_jac = system.linear_solver._assembled_jac
+
+            system._linearize(my_asm_jac, sub_do_ln=do_sub_ln)
+            if (my_asm_jac is not None and
+                    system.linear_solver._assembled_jac is not my_asm_jac):
+                my_asm_jac._update(system)
+
+            self._linearize()
+            my_asm_jac = system._linear_solver._assembled_jac._int_mtx._matrix
+            if my_asm_jac is not None:
+                if isinstance(my_asm_jac, csc_matrix):
+                    jac_lup = my_asm_jac.todense()
+                elif isinstance(my_asm_jac, np.ndarray):
+                    jac_lup = my_asm_jac
+            else:
+                jac_lup = system.linear_solver._build_mtx()
+
+            # p_residual_csc = np.matmul(self._p_residual.transpose(),jac_lup)
+            # P_tranpose_Jac =p_residual_csc.multiply(my_asm_jac)
+            # Jp = P^T x Jac x Q
+            # Jac_p = np.matmul( p_residual_csc, self._p_states)
+
+            # compute the projected jacobian        
+            # P^T x Jac
+            p_residual_csc = np.matmul(self._p_residual_precond.transpose(),jac_lup)
+            # P_tranpose_Jac =p_residual_csc.multiply(my_asm_jac)
+            # Jp = P^T x Jac x Q
+            Jac_p = np.matmul( p_residual_csc, self._p_states_precond)
+
+
+            Sub_sol = np.linalg.solve(Jac_p, -dimension_reduced_residual)
+            # system._dresiduals.set_vec(np.asarray(dimension_reduced_residual))
+        
+        
+            if self.linesearchPrecondSubLevel and not system.under_complex_step:
+                system._doutputs.set_val(0)
+                system._doutputs += self._p_states_precond.dot(Sub_sol)
+                # system._outputs
+                
+
+                if np.linalg.norm(self.projected_approx_residual) > self.options['precondlinesearch_robust_tol']*np.linalg.norm(projected_approx_residual_init):
+
+                    self.linesearchPrecondSubLevel._do_subsolve = do_subsolve
+                    self.linesearchPrecondSubLevel.solve()
+                    
+            else:
+            
+                system._outputs += self._p_states_precond.dot(Sub_sol)
+
+            # Call the training function
+            # if not self._trained_PIN_precond:
+            #     self._train_for_PIN_precond(dimension_reduced_residual, system._outputs.asarray(copy=True))
+            #     # return None
+
+            # if not self._preconditioned_precond:
+
+
+            # self._solver_info.pop()
+            # system._outputs.set_vec(init_states)
+            # Hybrid newton support.
+            if do_subsolve:
+                with Recording('Newton_subsolve', 0, self):
+                    # self._solver_info.append_solver()
+                    self._gs_iter()
+                    # self._solver_info.pop()
+            
+            self._run_apply()
+
+            init_residual = system._residuals.asarray(copy=True)
+            # mean_residuals = self.compute_means(self._cache_residuals)
+            init_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+            
+            # system._dresiduals.set_vec(system._residuals)
+            self.projected_approx_residual_precond = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
+
+            
+            if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
+                if system.comm.rank==0:
+                    print(" " + self.SOLVER +" preconditioned sublevel converged")
+                    
+            elif np.linalg.norm(self.projected_approx_residual_precond) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
+                if system.comm.rank==0:
+                    print(self.SOLVER +" preconditioned sublevel did not converged")
+                    msg = (f"Solver '{self.SOLVER}' preconditioned sublevel on system '{system.pathname}' stalled after "
+                f"{iter} iterations.")
+                    self.report_failure(msg)
+            self._preconditioned_precond=True
+            iter = iter + 1
 
     def _set_complex_step_mode(self, active):
         """
@@ -601,6 +814,25 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self._cache_states[:,self._cache_output_counter]=system._outputs.asarray(copy=True)
         self._cache_output_counter =self._cache_output_counter+ 1
 
+    def cache_residuals_pin_precond(self, dim_red_resid):
+        """
+        This function cache the nonlinear residuals from IN
+        """
+        system = self._system()
+        
+        self._cache_residuals_precond[:,self._cache_residual_counter_precond]=dim_red_resid
+        self._cache_residual_counter_precond =self._cache_residual_counter_precond + 1
+
+    def cache_states_pin_precond(self, dim_red_states):
+        """
+        This function cache the nonlinear solution from IN
+        """
+
+        system = self._system()
+        
+        self._cache_states_precond[:,self._cache_output_counter_precond]=dim_red_states
+        self._cache_output_counter_precond =self._cache_output_counter_precond+ 1
+
     def compute_means(self, matrix):
         """
         Compute the mean residual vector
@@ -641,3 +873,19 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self._p_states, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
 
 
+    def minimize_variance_precond(self):
+        """
+        This function minimizes the variance and compute the low frequncey subspace of the nonlinear system
+        """
+        system = self._system()
+
+        # svd on residuals
+
+        mean_residuals = self.compute_means(self._cache_residuals_precond)
+        mean_centered_residuals = self.compute_centered_solution(self._cache_residuals_precond,mean_residuals)
+        self._p_residual_precond, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
+
+        # svd on states
+        mean_states = self.compute_means(self._cache_states_precond)
+        mean_centered_states = self.compute_centered_solution(self._cache_states_precond,mean_states)
+        self._p_states_precond, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
