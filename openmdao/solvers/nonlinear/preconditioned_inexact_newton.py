@@ -362,15 +362,16 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
             abs_IN = norm
             rel_IN = norm / self.abs0 if self.abs0 != 0.0 else 1.0
-
-            if abs_IN < atol or rel_IN < rtol:
-                return 0
             
             # iter = iter + 1
             if self._iter_count==self.options['number_of_training_newton_steps']-1:
                 self._trained_PIN = True
                 if system.comm.rank==0:
                     print(self.SOLVER +" Ending training ")
+            if abs_IN < atol or rel_IN < rtol:
+                self._trained_PIN = True
+                self._preconditioned = True
+                return 0
 
 
     def _train_for_PIN_precond(self, dim_red_resid, dim_red_states):
@@ -408,15 +409,18 @@ class PreconditionedInexactNewton(NonlinearSolver):
             abs_IN = norm
             rel_IN = norm / self.abs0 if self.abs0 != 0.0 else 1.0
 
-            if abs_IN < atol or rel_IN < rtol:
-                return 0
-            
-            
+
             if self._iter_count_precond==self.options['number_of_training_precond_steps']-1:
                 self._trained_PIN_precond = True
                 if system.comm.rank==0:
                     print(" " + self.SOLVER +" ending precond training ")
+
             self._iter_count_precond = self._iter_count_precond + 1
+
+            if abs_IN < atol or rel_IN < rtol:
+                self._preconditioned_precond = True
+                self._trained_PIN_precond = True
+                return 0
 
     def _single_iteration(self):
         """
@@ -508,6 +512,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         # converge the reduce nonlinear space
         iter=0
+        self._iter_count_precond = 0
         while np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
             # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
             # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
@@ -564,7 +569,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 #     self.linesearchPrecondSubLevel.solve()
 
                 # if np.linalg.norm(self.projected_approx_residual) > self.options['precondlinesearch_robust_tol']*np.linalg.norm(projected_approx_residual_init):
-
                 self.linesearchPrecond._do_subsolve = do_subsolve
                 self.linesearchPrecond.solve()
                     
@@ -602,19 +606,26 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 # system._dresiduals.set_vec(system._residuals)
                 self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
 
-            
-            if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
+            iter = iter + 1
+            if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter <= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
                     print(" "+self.SOLVER +" preconditioned converged")
+                if self.linesearch.SOLVER=='LS: AG':
                     
+                    if 2*self.linesearch.options["rho"] < 1.0:
+                        self.linesearch.options["rho"] = 2*self.linesearch.options["rho"]
+                    else:
+                        self.linesearch.options["rho"] = 0.8
+                    if system.comm.rank==0:
+                        print(" "+self.SOLVER +f" updating LS: AG 'rho={self.linesearch.options['rho']}' for acceleration")
             elif np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
                     print(" "+self.SOLVER +" preconditioned did not converged")
                     msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
                     self.report_failure(msg)
-            self._preconditioned=True
-            iter = iter + 1
+        self._preconditioned=True
+            
 
     def _preconditioning_sub_iter(self):
         rtol = self.options['precond_sublevel_rtol']
@@ -742,8 +753,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             # system._dresiduals.set_vec(system._residuals)
             self.projected_approx_residual_precond = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
 
-            
-            if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
+            iter = iter + 1
+            if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter <= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
                     print("  " + self.SOLVER +" preconditioned sublevel converged")
                     
@@ -753,8 +764,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
                     msg = (f"Solver '{self.SOLVER}' preconditioned sublevel on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
                     self.report_failure(msg)
-            self._preconditioned_precond=True
-            iter = iter + 1
+        self._preconditioned_precond=True
+            
 
     def _set_complex_step_mode(self, active):
         """
