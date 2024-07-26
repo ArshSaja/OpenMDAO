@@ -54,9 +54,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
         # Slot for linesearch
         self.supports['linesearch'] = True
         self._preconditioned = False
-        self._linesearch = BoundsEnforceLS()
+        self._linesearch = ArmijoGoldsteinLS()
         self.linesearchPrecond = BoundsEnforceLS()
         self.linesearchPrecondSubLevel = BoundsEnforceLS()
+        self.linesearchPostNewton = BoundsEnforceLS()
 
     def _declare_options(self):
         """
@@ -75,6 +76,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self.options.declare('number_of_training_newton_steps', types=int, default=5,
                              desc='Maximum number of training iterations of inexacat newton.')
         self.options.declare('number_of_training_precond_steps', types=int, default=3,
+                             desc='Maximum number of training iterations of inexacat newton.')
+        self.options.declare('number_of_preocnditioner_mode', types=int, default=5,
+                             desc='Maximum number of training iterations of inexacat newton.')
+        self.options.declare('number_of_subpreocnditioner_mode', types=int, default=3,
                              desc='Maximum number of training iterations of inexacat newton.')
         self.options.declare('precond_rtol', default=1e-3,
                              desc='relative error tolerance for the preconditioned stage')
@@ -126,6 +131,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.linesearchPrecondSubLevel._setup_solvers(system, self._depth + 1)
         if self.linesearch is not None:
             self.linesearch._setup_solvers(system, self._depth + 1)
+        if self.linesearchPostNewton is not None:
+            self.linesearchPostNewton._setup_solvers(system, self._depth + 1)
 
     def _assembled_jac_solver_iter(self):
         """
@@ -158,6 +165,9 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.linesearchPrecondSubLevel._set_solver_print(level=level, type_=type_)
         if self.linesearch is not None:
             self.linesearch._set_solver_print(level=level, type_=type_)
+            
+        if self.linesearchPostNewton is not None:
+            self.linesearchPostNewton._set_solver_print(level=level, type_=type_)
 
     def _run_apply(self):
         """
@@ -205,6 +215,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.linesearchPrecondSubLevel._linearize()
         if self.linesearch is not None:
             self.linesearch._linearize()
+        if self.linesearchPostNewton is not None:
+            self.linesearchPostNewton._linearize()
 
     def _iter_initialize(self):
         """
@@ -241,11 +253,11 @@ class PreconditionedInexactNewton(NonlinearSolver):
         n_cols_precond = self.options['number_of_training_precond_steps']
         self._cache_residuals = np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
         # IN cache outputs
-        self._cache_states =  np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
+        self._cache_states =  np.asarray(np.zeros((n_rows, n_cols), dtype=system._vectors["output"]["linear"].asarray(copy=True).dtype))
 
         self._cache_residuals_precond = np.asarray(np.zeros((n_rows, n_cols_precond), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
         # IN cache outputs
-        self._cache_states_precond =  np.asarray(np.zeros((n_rows, n_cols_precond), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
+        self._cache_states_precond =  np.asarray(np.zeros((n_rows, n_cols_precond), dtype=system._vectors["output"]["linear"].asarray(copy=True).dtype))
 
 
         if self.options['debug_print']:
@@ -305,11 +317,18 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
             self.linear_solver.solve('fwd')
 
-            if self.linesearch and not system.under_complex_step:
-                self.linesearch._do_subsolve = do_subsolve
-                self.linesearch.solve()
+            if not self._preconditioned:
+                if self.linesearch and not system.under_complex_step:
+                    self.linesearch._do_subsolve = do_subsolve
+                    self.linesearch.solve()
+                else:
+                    system._outputs += system._doutputs
             else:
-                system._outputs += system._doutputs
+                if self.linesearchPostNewton and not system.under_complex_step:
+                    self.linesearchPostNewton._do_subsolve = do_subsolve
+                    self.linesearchPostNewton.solve()
+                else:
+                    system._outputs += system._doutputs
 
             self._solver_info.pop()
 
@@ -451,17 +470,17 @@ class PreconditionedInexactNewton(NonlinearSolver):
         system._owns_approx_jac = False
 
         try:
-            system._dresiduals.set_vec(system._residuals)
-            system._dresiduals *= -1.0
-            my_asm_jac = self.linear_solver._assembled_jac
+            # system._dresiduals.set_vec(system._residuals)
+            # system._dresiduals *= -1.0
+            # my_asm_jac = self.linear_solver._assembled_jac
 
-            system._linearize(my_asm_jac, sub_do_ln=do_sub_ln)
-            if (my_asm_jac is not None and
-                    system.linear_solver._assembled_jac is not my_asm_jac):
-                my_asm_jac._update(system)
+            # system._linearize(my_asm_jac, sub_do_ln=do_sub_ln)
+            # if (my_asm_jac is not None and
+            #         system.linear_solver._assembled_jac is not my_asm_jac):
+            #     my_asm_jac._update(system)
 
-            self._linearize()
-            self.linear_solver.solve('fwd')
+            # self._linearize()
+            # self.linear_solver.solve('fwd')
             # PIN starts
             if not self._preconditioned:
 
@@ -503,7 +522,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
         init_residual = self._cache_residuals[:,-1]
-        init_states = system._outputs
+        # init_states = system._outputs
         projected_approx_residual_init = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
 
         
@@ -535,8 +554,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
                     system.linear_solver._assembled_jac is not my_asm_jac):
                 my_asm_jac._update(system)
 
-            self._linearize()
-            self.linear_solver.solve('fwd')
+            # self._linearize()
+            # self.linear_solver.solve('fwd')
             my_asm_jac = system._linear_solver._assembled_jac._int_mtx._matrix
             if my_asm_jac is not None:
                 if isinstance(my_asm_jac, csc_matrix):
@@ -547,10 +566,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 jac_lup = system.linear_solver._build_mtx()
         
             # P^T x Jac
-            p_residual_csc = np.matmul(self._p_residual.transpose(),jac_lup)
+            p_residual_csc = np.matmul(jac_lup,self._p_states)
             # P_tranpose_Jac =p_residual_csc.multiply(my_asm_jac)
             # Jp = P^T x Jac x Q
-            Jac_p = np.matmul( p_residual_csc, self._p_states)
+            Jac_p = np.matmul( self._p_residual.transpose(),p_residual_csc )
 
 
             Sub_sol = np.linalg.solve(Jac_p, -dimension_reduced_residual)
@@ -559,8 +578,14 @@ class PreconditionedInexactNewton(NonlinearSolver):
             
         
             if self.linesearchPrecond and not system.under_complex_step:
-                system._doutputs.set_val(0)
+                system._doutputs.set_val(0.0)
+                # print("sub self._p_states", self._p_states)
                 system._doutputs += self._p_states.dot(Sub_sol)
+                # d_outputs = system._doutputs
+                # with system._unscaled_context(outputs=[d_outputs]):
+                #     system._doutputs.set_vec(d_outputs)
+
+                
                 # if self.options['linesearchprecondition_systems']=="all":
                 #     self.linesearchPrecond._do_subsolve = do_subsolve
                 #     self.linesearchPrecond.solve()
@@ -571,6 +596,11 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 # if np.linalg.norm(self.projected_approx_residual) > self.options['precondlinesearch_robust_tol']*np.linalg.norm(projected_approx_residual_init):
                 self.linesearchPrecond._do_subsolve = do_subsolve
                 self.linesearchPrecond.solve()
+                # print("sub sol", Sub_sol)
+                # print("sub pstat", self._p_states[0:10,:])
+                # print("sub pstat", self._p_states[-10:-1,:])
+                # print("sub sol", system._outputs.asarray(copy=True))
+                # quit()
                     
             else:
                 system._outputs += self._p_states.dot(Sub_sol)
@@ -589,7 +619,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
             
             self._run_apply()
 
-            init_residual = system._residuals.asarray()
+            init_residual = system._residuals.asarray(copy=True)
             # system._dresiduals.set_vec(system._residuals)
             self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
 
@@ -612,19 +642,22 @@ class PreconditionedInexactNewton(NonlinearSolver):
                     print(" "+self.SOLVER +" preconditioned converged")
                 if self.linesearch.SOLVER=='LS: AG':
                     
-                    if 2*self.linesearch.options["rho"] < 1.0:
+                    if 2*self.linesearch.options["rho"] < 0.5:
                         self.linesearch.options["rho"] = 2*self.linesearch.options["rho"]
                     else:
-                        self.linesearch.options["rho"] = 0.8
+                        self.linesearch.options["rho"] = 0.5
                     if system.comm.rank==0:
                         print(" "+self.SOLVER +f" updating LS: AG 'rho={self.linesearch.options['rho']}' for acceleration")
-            elif np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
+            elif iter >= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
                     print(" "+self.SOLVER +" preconditioned did not converged")
                     msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
                     self.report_failure(msg)
         self._preconditioned=True
+        # approx_status = system._owns_approx_jac
+        system._owns_approx_jac = approx_status
+        # print("done", self.projected_approx_residual, projected_approx_residual_init)
             
 
     def _preconditioning_sub_iter(self):
@@ -685,7 +718,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 my_asm_jac._update(system)
 
             self._linearize()
-            self.linear_solver.solve('fwd')
+            # self.linear_solver.solve('fwd')
             my_asm_jac = system._linear_solver._assembled_jac._int_mtx._matrix
             if my_asm_jac is not None:
                 if isinstance(my_asm_jac, csc_matrix):
@@ -765,6 +798,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 f"{iter} iterations.")
                     self.report_failure(msg)
         self._preconditioned_precond=True
+        system._owns_approx_jac = approx_status
             
 
     def _set_complex_step_mode(self, active):
@@ -856,7 +890,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
         """
         Compute the mean residual vector
         """
-        ncols = len(matrix[0][:])
+        
+        ncols = len(matrix[0,:])
         matrix_column_mean = np.sum(matrix, axis=1)
 
         return matrix_column_mean/ncols  
@@ -865,8 +900,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         """
         Compute the mean residual vector
         """
-        ncols = len(matrix[0][:])
-
+        ncols = len(matrix[0,:])
         means_expanded = np.outer(mean_solution, np.ones(ncols))
 
         centered_matrix = matrix - means_expanded
@@ -884,12 +918,32 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         mean_residuals = self.compute_means(self._cache_residuals)
         mean_centered_residuals = self.compute_centered_solution(self._cache_residuals,mean_residuals)
-        self._p_residual, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
+        p_residual, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
+   
+        # Compute the rank of the matrix
+        # rank1 = np.linalg.matrix_rank(mean_centered_residuals)
+        
 
         # svd on states
         mean_states = self.compute_means(self._cache_states)
         mean_centered_states = self.compute_centered_solution(self._cache_states,mean_states)
-        self._p_states, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
+        p_states, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
+
+        # Compute the rank of the matrix
+        # rank2 = np.linalg.matrix_rank(mean_centered_states)
+
+        nmodes = self.options['number_of_preocnditioner_mode']
+        # rank=max(rank1,rank2)
+
+        # if nmodes<len(p_residual[0,:]):
+        #     self._p_residual = p_residual[:,:nmodes]
+        # else:
+        self._p_residual = p_residual
+
+        # if nmodes<len(p_residual[0,:]):
+        #     self._p_states = p_states[:,:nmodes]
+        # else:
+        self._p_states = p_states
 
 
     def minimize_variance_precond(self):
@@ -902,9 +956,28 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         mean_residuals = self.compute_means(self._cache_residuals_precond)
         mean_centered_residuals = self.compute_centered_solution(self._cache_residuals_precond,mean_residuals)
-        self._p_residual_precond, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
+        p_residual_precond, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
+
+        # Compute the rank of the matrix
+        # rank1 = np.linalg.matrix_rank(mean_centered_residuals)
+        nmodes = self.options['number_of_subpreocnditioner_mode']
+        
 
         # svd on states
         mean_states = self.compute_means(self._cache_states_precond)
         mean_centered_states = self.compute_centered_solution(self._cache_states_precond,mean_states)
-        self._p_states_precond, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
+        p_states_precond, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
+
+        # Compute the rank of the matrix
+        # rank2 = np.linalg.matrix_rank(mean_centered_states)
+        # rank=max(rank1,rank2)
+
+        # if nmodes<len(p_residual_precond[0,:]):
+        #     self._p_residual_precond = p_residual_precond[:,:nmodes]
+        # else:
+        self._p_residual_precond = p_residual_precond
+
+        # if nmodes<len(p_residual_precond[0,:]):
+        #     self._p_states_precond = p_states_precond[:,:nmodes]
+        # else:
+        self._p_states_precond = p_states_precond
