@@ -85,7 +85,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
                              desc='relative error tolerance for the preconditioned stage')
         self.options.declare('precond_sublevel_rtol', default=1e-3,
                              desc='relative error tolerance for the preconditioned stage')
-        self.options.declare('train_stall_tol', default=1e-6,
+        self.options.declare('train_stall_tol', default=1e-1,
                              desc='When stall checking is enabled, the threshold below which the '
                                   'residual norm is considered unchanged.')
         self.options.declare('train_stall_tol_type', default='rel', values=('abs', 'rel'),
@@ -403,7 +403,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         if stall_limit > 0:
             norm_for_stall = rel_IN if train_stall_tol_type == 'rel' else abs_IN
             norm_diff = np.abs(self.train_stall_norm - norm_for_stall)
-            print("stall dif: ", norm_diff, train_stall_tol)
+            # print("stall dif: ", norm_diff, train_stall_tol)
             if norm_diff <= train_stall_tol:
                 if self._iter_count >= stall_limit-1:
                     stalled = True
