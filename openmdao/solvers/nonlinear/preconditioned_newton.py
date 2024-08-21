@@ -11,7 +11,7 @@ from openmdao.recorders.recording_iteration_stack import Recording
 from openmdao.utils.mpi import MPI
 
 
-class PreconditionedInexactNewton(NonlinearSolver):
+class PreconditionedNewton(NonlinearSolver):
     """
     Newton solver.
 
@@ -31,7 +31,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         Line search algorithm. Default is None for no line search.
     """
 
-    SOLVER = 'NL: PINewton'
+    SOLVER = 'NL: PNewton'
 
     def __init__(self, **kwargs):
         """
@@ -66,6 +66,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
         super()._declare_options()
 
         self.options.declare('solve_subsystems', types=bool,
+                             desc='Set to True to turn on sub-solvers (Hybrid Newton).')
+        self.options.declare('just_cache_newton', types=bool,
+                             desc='Set to True to turn on sub-solvers (Hybrid Newton).')
+        self.options.declare('output_dir', types=str,
                              desc='Set to True to turn on sub-solvers (Hybrid Newton).')
         self.options.declare('max_sub_solves', types=int, default=50,
                              desc='Maximum number of subsystem solves.')
@@ -349,6 +353,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             system._owns_approx_jac = approx_status
 
             if self._cache_residual_counter==0:
+                init_residual = system._residuals.asarray(copy=True)
+                # self.save_vecs_and_mtrx("Res_First_newton_iter.npz",vec_mtx=init_residual)
                 self._run_apply()
                 norm = self._iter_get_norm()
                 self.abs0 = norm
@@ -418,6 +424,12 @@ class PreconditionedInexactNewton(NonlinearSolver):
         if abs_IN < atol or rel_IN < rtol:
             self._trained_PIN = True
             self._preconditioned = True
+            if self.options['just_cache_newton']:
+                if system.comm.rank==0:
+                    print(self.SOLVER +" caching res and states ")
+                    # print(self._cache_residuals)
+                self.save_vecs_and_mtrx("cached_res.npz",vec_mtx=self._cache_residuals)
+                self.save_vecs_and_mtrx("cached_sol.npz",vec_mtx=self._cache_states)
             return 0
 
 
@@ -480,9 +492,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
         
         # First, we run the newton solver sequentially
         # Call the training function
-        if not self._trained_PIN:
-            self._train_for_PIN()
-            return None
+        if self.options["just_cache_newton"]:
+            if not self._trained_PIN:
+                self._train_for_PIN()
+                return None
         
         # self._cache_residuals = np.ndarray(self._cache_residuals)
         # self._cache_states = np.ndarray(self._cache_states)
@@ -521,10 +534,12 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 ### Step 2 ###
                 # call the precondition convergence
                 self._preconditioning_iter()
-            
+                # init_residual = system._residuals.asarray(copy=True)
+                # self.save_vecs_and_mtrx("Res_after_precond_iter.npz",vec_mtx=init_residual)
             # run the inexact newton
             self._inexact_newton_iteration()
-            
+            init_residual = system._residuals.asarray(copy=True)
+            # self.save_vecs_and_mtrx("Res_after_precond_iter.npz",vec_mtx=init_residual)
         finally:
             # Enable local fd
             system._owns_approx_jac = approx_status
@@ -547,11 +562,13 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self.PTP= np.matmul(self._p_residual, self._p_residual.transpose())
 
         # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
-        # init_residual = self._cache_residuals[:,-1]
-        init_residual = system._residuals.asarray(copy=True)
+        init_residual = self._cache_residuals[:,0]
+        # init_residual = system._residuals.asarray(copy=True)
+        # self.save_vecs_and_mtrx("Res_last_newton_iter.npz",vec_mtx=init_residual)
+        
         # init_states = system._outputs
         projected_approx_residual_init = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
-
+        # self.save_vecs_and_mtrx("PorjecRes_first_precond_iter.npz",vec_mtx=projected_approx_residual_init)
         
         self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
         # self._preconditioned = True
@@ -647,15 +664,18 @@ class PreconditionedInexactNewton(NonlinearSolver):
             if not self._preconditioned_precond and self._trained_PIN_precond and self.options['solve_subprecond']:
                 # compute P and Q projectors
                 self.minimize_variance_precond()
+                # self.save_vecs_and_mtrx("PorjecRes_last_before_subprecond_iter.npz",vec_mtx=self.projected_approx_residual)
                 self._preconditioning_sub_iter()
                 init_residual = system._residuals.asarray()
                 # system._dresiduals.set_vec(system._residuals)
                 self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+                # self.save_vecs_and_mtrx("PorjecRes_last_after_subprecond_iter.npz",vec_mtx=self.projected_approx_residual)
 
             iter = iter + 1
             if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter <= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
                     print(" "+self.SOLVER +" preconditioned converged")
+                # self.save_vecs_and_mtrx("PorjecRes_last_iter.npz",vec_mtx=self.projected_approx_residual)
                 # if self.linesearch.SOLVER=='LS: AG':
                     
                 #     if 2*self.linesearch.options["rho"] < 0.5:
@@ -705,7 +725,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         # # system._dresiduals.set_vec(system._residuals)
         projected_approx_residual_init = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
         self.projected_approx_residual_precond = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
-        
+        # self.save_vecs_and_mtrx("PorjecRes_first_subprecond_iter.npz",vec_mtx=projected_approx_residual_init)
         # self.projected_approx_residual_precond = PTP.dot(init_residual-mean_residuals) + mean_residuals
         # self._preconditioned = True
 
@@ -807,7 +827,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
             if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter <= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
                     print("  " + self.SOLVER +" preconditioned sublevel converged")
-                    
+                # self.save_vecs_and_mtrx("PorjecRes_last_subprecond_iter.npz",vec_mtx=self.projected_approx_residual_precond)    
             elif np.linalg.norm(self.projected_approx_residual_precond) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
                     print(self.SOLVER +" preconditioned sublevel did not converged")
@@ -944,22 +964,47 @@ class PreconditionedInexactNewton(NonlinearSolver):
         This function minimizes the variance and compute the low frequncey subspace of the nonlinear system
         """
         system = self._system()
-
+        import os
         # svd on residuals
-
-        mean_residuals = self.compute_means(self._cache_residuals)
-        mean_centered_residuals = self.compute_centered_solution(self._cache_residuals,mean_residuals)
-        p_residual, p_sing, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
+        if  self.options["just_cache_newton"]:
+            cached_res = self._cache_residuals
+        else:
+            cached_res_file = np.load(os.path.join(self.options['output_dir'], 'cached_res.npz'))
+            cached_res = cached_res_file['vec_mtx']
+            self._cache_residuals = cached_res
+        # print(cached_res)
+        mean_residuals = self.compute_means(cached_res)
+        mean_centered_residuals = self.compute_centered_solution(cached_res,mean_residuals)
+        p_residual, p_residual_singular, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
+        
+        # self.save_vecs_and_mtrx("MeanRes_first_newton_iter.npz",vec_mtx=mean_centered_residuals[:,0])
+        # self.save_vecs_and_mtrx("MeanRes_last_newton_iter.npz",vec_mtx=mean_centered_residuals[:,-1])
+        nmodes = self.options['number_of_preocnditioner_mode']
+        
+            # p_residual = np.load()
         # print("singular",s)
         # Compute the rank of the matrix
         # rank1 = np.linalg.matrix_rank(mean_centered_residuals)
         
 
         # svd on states
-        mean_states = self.compute_means(self._cache_states)
-        mean_centered_states = self.compute_centered_solution(self._cache_states,mean_states)
-        p_states, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
+        if self.options["just_cache_newton"]:
+            cached_states = self._cache_states
+        else:
+            cached_states_file = np.load(os.path.join(self.options['output_dir'], 'cached_sol.npz'))
+            cached_states = cached_states_file['vec_mtx']
+            self._cache_states = cached_states
 
+        mean_states = self.compute_means(cached_states)
+        mean_centered_states = self.compute_centered_solution(cached_states,mean_states)
+        p_states, p_states_singular, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
+        if not self.options["just_cache_newton"]:
+            self.save_vecs_and_mtrx("res_singular.npz",vec_mtx= p_residual_singular)
+            self.save_vecs_and_mtrx("states_singular.npz",vec_mtx= p_states_singular)
+        np.set_printoptions(threshold=np.inf)
+        # print("singular res: ",p_residual_singular)
+        # print("singular sol: ",p_states_singular)
+        # quit()
         # Compute the rank of the matrix
         # rank2 = np.linalg.matrix_rank(mean_centered_states)
         # np.set_printoptions(threshold=np.inf)
@@ -974,12 +1019,12 @@ class PreconditionedInexactNewton(NonlinearSolver):
         #     self._p_residual = p_residual[:,:nmodes]
         # else:
         # self._p_residual,_ = np.linalg.qr(p_residual[:,:nmodes].transpose())
-        self._p_residual = p_residual
+        self._p_residual = p_residual[:,:nmodes]
         # if nmodes<len(p_residual[0,:]):
         #     self._p_states = p_states[:,:nmodes]
         # else:
         # self._p_states,_ = np.linalg.qr(p_states[:,:nmodes])
-        self._p_states = p_states
+        self._p_states = p_states[:,:nmodes]
 
 
     def minimize_variance_precond(self):
@@ -992,6 +1037,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         mean_residuals = self.compute_means(self._cache_residuals_precond)
         mean_centered_residuals = self.compute_centered_solution(self._cache_residuals_precond,mean_residuals)
+        # self.save_vecs_and_mtrx("MeanRes_first_precond_iter.npz",vec_mtx=mean_centered_residuals[:,0])
+        # self.save_vecs_and_mtrx("MeanRes_last_precond_iter.npz",vec_mtx=mean_centered_residuals[:,-1])
         p_residual_precond, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
 
         # Compute the rank of the matrix
@@ -1017,3 +1064,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         #     self._p_states_precond = p_states_precond[:,:nmodes]
         # else:
         self._p_states_precond = p_states_precond
+
+    def save_vecs_and_mtrx(self,  file_name,vec_mtx=None):
+        import os
+        np.savez(os.path.join(self.options['output_dir'], file_name),vec_mtx=vec_mtx)
