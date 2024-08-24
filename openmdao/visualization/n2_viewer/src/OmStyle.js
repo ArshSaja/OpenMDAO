@@ -48,7 +48,7 @@ class OmStyle extends Style {
         ['LN: LNBGS', 'NL: NLBGS', '#b3de69'],
         ['LN: USER', null, '#fccde5'],
         [null, 'NL: Newton', '#d9d9d9'],
-        [null, 'NL: PINewton', '#80b1d3'],
+        [null, 'NL: MPNewton', '#80b1d3'],
         [null, 'NL: BROYDEN', '#bc80bd'],
         ['solve_linear', 'solve_nonlinear', '#ccebc5'],
         ['other', 'other', '#ffed6f'],
