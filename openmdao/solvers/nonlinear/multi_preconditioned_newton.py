@@ -406,7 +406,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
         # Check if convergence is stalled.
         if stall_limit > 0:
             norm_for_stall = rel_IN if train_stall_tol_type == 'rel' else abs_IN
-            norm_diff = np.abs(self.train_stall_norm - norm_for_stall)
+            norm_diff = abs(self.train_stall_norm - norm_for_stall)
             # print("stall dif: ", norm_diff,norm_for_stall , self.train_stall_norm, train_stall_tol, self._solver_info.prefix, train_stall_tol_type)
             if norm_diff <= train_stall_tol:
                 if self._iter_count >= stall_limit-1:
@@ -442,8 +442,8 @@ class MultiPreconditionedNewton(NonlinearSolver):
         # iter = 0
         if self._iter_count_precond<self.options['number_of_training_precond_steps']:
 
-            if system.comm.rank==0 and self._iter_count_precond==0:
-                print(prefix +" starting precond training ")
+            # if system.comm.rank==0 and self._iter_count_precond==0:
+            #     print(prefix +" starting precond training ")
 
             # self._inexact_newton_iteration()
 
@@ -567,13 +567,16 @@ class MultiPreconditionedNewton(NonlinearSolver):
         prefix = self._solver_info.prefix + self.SOLVER
         self.precond_stall_norm = 1
         stalled = False
-        init_precond_norm = np.linalg.norm(projected_approx_residual_init)
+        init_precond_norm = np.linalg.norm(projected_approx_residual_init)  if np.linalg.norm(projected_approx_residual_init) != 0.0 else 1
         while np.linalg.norm(self.projected_approx_residual) > rtol* init_precond_norm and iter < self.options['precond_max_sub_solves']:
             # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
             # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
             
-            if iter==0 and system.comm.rank==0:
-                print(prefix +" Starting preconditioning")
+            if iter==0:
+                if system.comm.rank==0:
+                    print(prefix +" Starting preconditioning")
+                    if self.options['solve_subprecond']:
+                        print(prefix +" starting precond training ")
             # dimension reduced vector
 
             
@@ -650,11 +653,11 @@ class MultiPreconditionedNewton(NonlinearSolver):
             
              # Check if convergence is stalled.
             if stall_limit > 0:
-                norm_for_stall = np.linalg.norm(self.projected_approx_residual)/init_precond_norm if init_precond_norm != 0.0 else 1.0
-                norm_diff = np.abs(self.precond_stall_norm - norm_for_stall)
-                # print("stall dif: ", norm_diff,norm_for_stall , self.train_stall_norm, train_stall_tol, self._solver_info.prefix, train_stall_tol_type)
+                norm_for_stall = np.linalg.norm(self.projected_approx_residual)/init_precond_norm
+                norm_diff = abs(self.precond_stall_norm - norm_for_stall) 
+                # print("stall dif: ",norm_for_stall , norm_diff, self.precond_stall_norm)
                 if norm_diff <= precond_stall_tol:
-                    if iter > stall_limit:
+                    if iter >= stall_limit-1:
                         # stalling. so end the end training
                         stalled = True
                 else:
@@ -731,7 +734,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
         # self._preconditioned = True
         prefix = self._solver_info.prefix + self.SOLVER
         # converge the reduce nonlinear space
-        init_secondprecond_norm = np.linalg.norm(projected_approx_residual_init)
+        init_secondprecond_norm = np.linalg.norm(projected_approx_residual_init) if np.linalg.norm(projected_approx_residual_init) != 0.0 else 1
         iter=0
         while np.linalg.norm(self.projected_approx_residual_precond) > rtol* init_secondprecond_norm and iter < self.options['precond_max_sub_solves']:
             # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
