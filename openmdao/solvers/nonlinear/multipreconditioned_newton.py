@@ -643,7 +643,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
             
 
     def _preconditioning_sub_iter(self):
-        rtol = self.options['precond_sublevel_rtol']
+        rtol = self.options['level_2nd_precond_rtol']
         system = self._system()
         # self._solver_info.append_subsolver()
         do_subsolve = self.options['solve_subsystems'] and not system.under_complex_step and \
