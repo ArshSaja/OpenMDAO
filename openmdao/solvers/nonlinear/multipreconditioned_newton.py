@@ -67,38 +67,30 @@ class MultiPreconditionedNewton(NonlinearSolver):
 
         self.options.declare('solve_subsystems', types=bool,
                              desc='Set to True to turn on sub-solvers (Hybrid Newton).')
-        self.options.declare('output_dir', types=str,
-                             desc='Set to True to turn on sub-solvers (Hybrid Newton).')
-        self.options.declare('max_sub_solves', types=int, default=50,
+        self.options.declare('max_sub_solves', types=int, default=100,
                              desc='Maximum number of subsystem solves.')
-        self.options.declare('precond_max_sub_solves', types=int, default=10,
-                             desc='Maximum number of precondition solves.')
-        self.options.declare('precond_max_subprecond_solves', types=int, default=5,
-                             desc='Maximum number of precondition solves.')
-        self.options.declare('number_of_training_newton_steps', types=int, default=5,
-                             desc='Maximum number of training iterations of inexacat newton.')
-        self.options.declare('number_of_training_precond_steps', types=int, default=3,
+        self.options.declare('level_1st_precond_max_sub_solves', types=int, default=15,
+                             desc='Maximum number of first-level precondition solves.')
+        self.options.declare('level_2nd_precond_max_sub_solves', types=int, default=10,
+                             desc='Maximum number of second-level precondition solves.')
+        self.options.declare('minimum_training_newton_iter', types=int, default=5,
+                             desc='Minimum number of training iterations of Newton.')
+        self.options.declare('minimum_training_1st_level_precond_iter', types=int, default=3,
                              desc='Maximum number of training iterations of inexacat newton.')
 
-        self.options.declare('precond_rtol', default=1e-3,
-                             desc='relative error tolerance for the preconditioned stage')
-        self.options.declare('precond_sublevel_rtol', default=1e-3,
-                             desc='relative error tolerance for the preconditioned stage')
-        self.options.declare('train_stall_tol', default=1e-1,
-                             desc='When stall checking is enabled, the threshold below which the '
-                                  'residual norm is considered unchanged.')
-        self.options.declare('precond_stall_tol', default=1e-1,
-                             desc='When stall checking is enabled, the threshold below which the '
-                                  'residual norm is considered unchanged.')
-        self.options.declare('train_stall_tol_type', default='rel', values=('abs', 'rel'),
+        self.options.declare('level_1st_precond_rtol', default=1e-2,
+                             desc='relative error tolerance for the 1st level preconditioned stage')
+        self.options.declare('level_2nd_precond_rtol', default=1e-2,
+                             desc='relative error tolerance for the 2nd level preconditioned stage')
+        self.options.declare('Newton_train_stall_tol', default=1e-2,
+                             desc='Stall tolerance for the Newton training stage. When the Newton stalls for this tolerance and the training iteration is higher than minimum_training_newton_iter, precondtioning step will be activated.')
+        self.options.declare('level_1st_precond_stall_tol', default=1e-1,
+                             desc='Stall tolerance for the 1st level precond training stage. When the precondition stalls for this tolerance and the training iteration is higher than minimum_training_1st_level_precond_iter, 2nd-level precondtioning will be activated.')
+        self.options.declare('Newton_train_stall_tol_type', default='rel', values=('abs', 'rel'),
                              desc='Specifies whether the absolute or relative norm of the '
-                                  'residual is used for stall detection.')
-        self.options.declare('solve_subprecond', types=bool,default=False,
-                             desc='Set to True to turn on sub-solvers (Hybrid Newton).')
-        self.options.declare('linesearchprecondition_systems', default='all',
-                    desc="which subsystem needs robust linesearch in preconditioning.")
-        self.options.declare('precondlinesearch_robust_tol', default=1e-1,
-                    desc="Method to calculate stopping condition.")
+                                  'residual is used for Newton stall detection in the training stage.')
+        self.options.declare('solve_2nd_level_precond', types=bool,default=False,
+                             desc='Set to True to turn on activate 2nd level preconditioning.')
         self.options.declare('cs_reconverge', types=bool, default=True,
                              desc='When True, when this driver solves under a complex step, nudge '
                              'the Solution vector by a small amount so that it reconverges.')
@@ -257,8 +249,8 @@ class MultiPreconditionedNewton(NonlinearSolver):
         
 
         n_rows = len(system._residuals.asarray(copy=True))
-        n_cols = self.options['number_of_training_newton_steps']
-        n_cols_precond = self.options['number_of_training_precond_steps']
+        n_cols = self.options['minimum_training_newton_iter']
+        n_cols_precond = self.options['minimum_training_1st_level_precond_iter']
         self._cache_residuals = np.array(np.zeros((n_rows, n_cols), dtype=system._vectors["residual"]["linear"].asarray(copy=True).dtype))
         # IN cache outputs
         self._cache_states =  np.array(np.zeros((n_rows, n_cols), dtype=system._vectors["output"]["linear"].asarray(copy=True).dtype))
@@ -371,9 +363,9 @@ class MultiPreconditionedNewton(NonlinearSolver):
 
         # run inexact newton steps for training
         # iter = 0
-        stall_limit = self.options['number_of_training_newton_steps']
-        train_stall_tol = self.options['train_stall_tol']
-        train_stall_tol_type = self.options['train_stall_tol_type']
+        stall_limit = self.options['minimum_training_newton_iter']
+        train_stall_tol = self.options['Newton_train_stall_tol']
+        train_stall_tol_type = self.options['Newton_train_stall_tol_type']
         # norm = self._iter_get_norm()
         # abs = norm
         # if norm0 == 0:
@@ -381,10 +373,10 @@ class MultiPreconditionedNewton(NonlinearSolver):
         # rel = norm / self._norm0
         
         stalled = False 
-        # if self._iter_count<self.options['number_of_training_newton_steps']:
+        # if self._iter_count<self.options['minimum_training_newton_iter']:
 
         if system.comm.rank==0 and self._iter_count==0:
-            print(prefix+" Starting training ")
+            print(prefix+" starting Newton training ")
 
         self._inexact_newton_iteration()
 
@@ -413,11 +405,11 @@ class MultiPreconditionedNewton(NonlinearSolver):
                 self.train_stall_norm = norm_for_stall
 
         # iter = iter + 1
-        if self._iter_count>=self.options['number_of_training_newton_steps']-1 and stalled:
+        if self._iter_count>=self.options['minimum_training_newton_iter']-1 and stalled:
             self._trained_PIN = True
             if system.comm.rank==0:
                 
-                print(prefix +" Ending training ")
+                print(prefix +" ending Newton training ")
         if abs_IN < atol or rel_IN < rtol:
             self._trained_PIN = True
             self._preconditioned = True
@@ -438,7 +430,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
 
         prefix = self._solver_info.prefix + self.SOLVER
         # run inexact newton steps for training
-        if self._iter_count_precond<self.options['number_of_training_precond_steps']:
+        if self._iter_count_precond<self.options['minimum_training_1st_level_precond_iter']:
 
             # compute the residuals
             self._run_apply()
@@ -465,8 +457,6 @@ class MultiPreconditionedNewton(NonlinearSolver):
         """
         Perform the operations in the iteration loop.
         """
-
-        rtol = self.options['precond_rtol']
 
         ### Step 1 ###
         
@@ -505,9 +495,9 @@ class MultiPreconditionedNewton(NonlinearSolver):
         
     
     def _preconditioning_iter(self):
-        rtol = self.options['precond_rtol']
-        stall_limit = self.options['number_of_training_precond_steps']
-        precond_stall_tol = self.options['precond_stall_tol']
+        rtol = self.options['level_1st_precond_rtol']
+        stall_limit = self.options['minimum_training_1st_level_precond_iter']
+        precond_stall_tol = self.options['level_1st_precond_stall_tol']
         system = self._system()
         # self._solver_info.append_subsolver()
         do_subsolve = self.options['solve_subsystems'] and not system.under_complex_step and \
@@ -539,13 +529,13 @@ class MultiPreconditionedNewton(NonlinearSolver):
         self.precond_stall_norm = 1.0
         stalled = False
         init_precond_norm = np.linalg.norm(projected_approx_residual_init)  if np.linalg.norm(projected_approx_residual_init) != 0.0 else 1
-        while np.linalg.norm(self.projected_approx_residual) > rtol* init_precond_norm and iter < self.options['precond_max_sub_solves']:
+        while np.linalg.norm(self.projected_approx_residual) > rtol* init_precond_norm and iter < self.options['level_1st_precond_max_sub_solves']:
         
             if iter==0:
                 if system.comm.rank==0:
-                    print(prefix +" Starting preconditioning")
-                    if self.options['solve_subprecond']:
-                        print(prefix +" starting precond training ")       
+                    print(prefix +" starting preconditioning")
+                    if self.options['solve_2nd_level_precond']:
+                        print(prefix +" starting 1st level precondition training ")       
 
             dimension_reduced_residual = self._p_residual.transpose().dot(self.projected_approx_residual)
 
@@ -620,16 +610,16 @@ class MultiPreconditionedNewton(NonlinearSolver):
                     self.precond_stall_norm = norm_for_stall
 
             # Call the training function
-            if not self._trained_PIN_precond and self.options['solve_subprecond']:
+            if not self._trained_PIN_precond and self.options['solve_2nd_level_precond']:
                 self._train_for_PIN_precond(self.projected_approx_residual, system._outputs.asarray(copy=True))
                 if stalled:
                     self._trained_PIN_precond = True
                     if system.comm.rank==0:
-                        print(prefix +" ending precond training ")
+                        print(prefix +" ending 1st level precond training")
 
                 # return None
 
-            if not self._preconditioned_precond and self._trained_PIN_precond and self.options['solve_subprecond']:
+            if not self._preconditioned_precond and self._trained_PIN_precond and self.options['solve_2nd_level_precond']:
                 # compute P and Q projectors
                 self.minimize_variance_precond()
                 self._preconditioning_sub_iter()
@@ -637,14 +627,14 @@ class MultiPreconditionedNewton(NonlinearSolver):
                 self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
 
             iter = iter + 1
-            if np.linalg.norm(self.projected_approx_residual) <= rtol*init_precond_norm and iter <= self.options['precond_max_sub_solves']:
+            if np.linalg.norm(self.projected_approx_residual) <= rtol*init_precond_norm and iter <= self.options['level_1st_precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print(prefix +" preconditioned converged")
+                    print(prefix +" 1st level preconditioned converged")
 
-            elif iter >= self.options['precond_max_sub_solves']:
+            elif iter >= self.options['level_1st_precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print(prefix +" preconditioned did not converged")
-                    msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
+                    print(prefix +" 1st level precondition did not converged")
+                    msg = (f"Solver '{self.SOLVER}' 1st level precondition on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
                     self.report_failure(msg)
             system._owns_approx_jac = approx_status
@@ -680,12 +670,12 @@ class MultiPreconditionedNewton(NonlinearSolver):
         # converge the reduce nonlinear space
         init_secondprecond_norm = np.linalg.norm(projected_approx_residual_init) if np.linalg.norm(projected_approx_residual_init) != 0.0 else 1
         iter=0
-        while np.linalg.norm(self.projected_approx_residual_precond) > rtol* init_secondprecond_norm and iter < self.options['precond_max_sub_solves']:
+        while np.linalg.norm(self.projected_approx_residual_precond) > rtol* init_secondprecond_norm and iter < self.options['level_2nd_precond_max_sub_solves']:
             # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
             # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
             
             if iter==0 and system.comm.rank==0:
-                print(prefix + " starting sublevel preconditioning")
+                print(prefix + " starting 2nd level preconditioning")
             # dimension reduced vector
 
             
@@ -773,14 +763,14 @@ class MultiPreconditionedNewton(NonlinearSolver):
             self.projected_approx_residual_precond = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
 
             iter = iter + 1
-            if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*init_secondprecond_norm and iter <= self.options['precond_max_sub_solves']:
+            if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*init_secondprecond_norm and iter <= self.options['level_2nd_precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print(prefix +" preconditioned sublevel converged")
+                    print(prefix +" 2nd level preconditioned converged")
 
-            elif np.linalg.norm(self.projected_approx_residual_precond) > rtol*init_secondprecond_norm and iter >= self.options['precond_max_sub_solves']:
+            elif np.linalg.norm(self.projected_approx_residual_precond) > rtol*init_secondprecond_norm and iter >= self.options['level_2nd_precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print(prefix +" preconditioned sublevel did not converged")
-                    msg = (f"Solver '{self.SOLVER}' preconditioned sublevel on system '{system.pathname}' stalled after "
+                    print(prefix +" 2nd level preconditioned did not converged")
+                    msg = (f"Solver '{self.SOLVER}' 2nd level on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
                     self.report_failure(msg)
             system._owns_approx_jac = approx_status
@@ -840,7 +830,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
         This function cache the nonlinear residuals from IN
         """
         system = self._system()
-        training_step=self.options['number_of_training_newton_steps']
+        training_step=self.options['minimum_training_newton_iter']
         
         if self._cache_residual_counter<training_step:
             self._cache_residuals[:,self._cache_residual_counter]=system._residuals.asarray(copy=True)
@@ -856,7 +846,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
         """
 
         system = self._system()
-        training_step=self.options['number_of_training_newton_steps']
+        training_step=self.options['minimum_training_newton_iter']
         
         if self._cache_output_counter<training_step:
         
