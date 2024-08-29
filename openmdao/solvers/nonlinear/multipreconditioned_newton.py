@@ -536,7 +536,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
         iter=0
         self._iter_count_precond = 0
         prefix = self._solver_info.prefix + self.SOLVER
-        self.precond_stall_norm = 1
+        self.precond_stall_norm = 1.0
         stalled = False
         init_precond_norm = np.linalg.norm(projected_approx_residual_init)  if np.linalg.norm(projected_approx_residual_init) != 0.0 else 1
         while np.linalg.norm(self.projected_approx_residual) > rtol* init_precond_norm and iter < self.options['precond_max_sub_solves']:
