@@ -405,7 +405,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
         # Check if convergence is stalled.
         if stall_limit > 0:
             norm_for_stall = rel_IN if train_stall_tol_type == 'rel' else abs_IN
-            norm_diff = abs(self.train_stall_norm - norm_for_stall)
+            norm_diff = self.train_stall_norm - norm_for_stall
             if norm_diff <= train_stall_tol:
                 if self._iter_count >= stall_limit-1:
                     stalled = True
@@ -610,7 +610,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
              # Check if convergence is stalled.
             if stall_limit > 0:
                 norm_for_stall = np.linalg.norm(self.projected_approx_residual)/init_precond_norm
-                norm_diff = abs(self.precond_stall_norm - norm_for_stall) 
+                norm_diff = self.precond_stall_norm - norm_for_stall 
                 # print("stall dif: ",norm_for_stall , norm_diff, self.precond_stall_norm)
                 if norm_diff <= precond_stall_tol:
                     if iter >= stall_limit-1:
