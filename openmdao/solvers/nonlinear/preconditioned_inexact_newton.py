@@ -11,7 +11,7 @@ from openmdao.recorders.recording_iteration_stack import Recording
 from openmdao.utils.mpi import MPI
 
 
-class PreconditionedInexactNewton(NonlinearSolver):
+class MultiPreconditionedNewton(NonlinearSolver):
     """
     Newton solver.
 
@@ -31,7 +31,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         Line search algorithm. Default is None for no line search.
     """
 
-    SOLVER = 'NL: PINewton'
+    SOLVER = 'NL: MPNewton'
 
     def __init__(self, **kwargs):
         """
@@ -67,6 +67,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         self.options.declare('solve_subsystems', types=bool,
                              desc='Set to True to turn on sub-solvers (Hybrid Newton).')
+        self.options.declare('output_dir', types=str,
+                             desc='Set to True to turn on sub-solvers (Hybrid Newton).')
         self.options.declare('max_sub_solves', types=int, default=50,
                              desc='Maximum number of subsystem solves.')
         self.options.declare('precond_max_sub_solves', types=int, default=10,
@@ -77,15 +79,15 @@ class PreconditionedInexactNewton(NonlinearSolver):
                              desc='Maximum number of training iterations of inexacat newton.')
         self.options.declare('number_of_training_precond_steps', types=int, default=3,
                              desc='Maximum number of training iterations of inexacat newton.')
-        self.options.declare('number_of_preocnditioner_mode', types=int, default=5,
-                             desc='Maximum number of training iterations of inexacat newton.')
-        self.options.declare('number_of_subpreocnditioner_mode', types=int, default=3,
-                             desc='Maximum number of training iterations of inexacat newton.')
+
         self.options.declare('precond_rtol', default=1e-3,
                              desc='relative error tolerance for the preconditioned stage')
         self.options.declare('precond_sublevel_rtol', default=1e-3,
                              desc='relative error tolerance for the preconditioned stage')
         self.options.declare('train_stall_tol', default=1e-1,
+                             desc='When stall checking is enabled, the threshold below which the '
+                                  'residual norm is considered unchanged.')
+        self.options.declare('precond_stall_tol', default=1e-1,
                              desc='When stall checking is enabled, the threshold below which the '
                                   'residual norm is considered unchanged.')
         self.options.declare('train_stall_tol_type', default='rel', values=('abs', 'rel'),
@@ -292,7 +294,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
             rec.abs = norm
             norm0 = norm if norm != 0.0 else 1.0
             rec.rel = norm / norm0
-
+            self.abs0 = norm
+            self.train_stall_norm=norm
         return norm0, norm
 
     def _inexact_newton_iteration(self):
@@ -349,10 +352,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
             system._owns_approx_jac = approx_status
 
             if self._cache_residual_counter==0:
-                self._run_apply()
-                norm = self._iter_get_norm()
-                self.abs0 = norm
-                self.train_stall_norm=norm
+                init_residual = system._residuals.asarray(copy=True)
+                # self._run_apply()
+                # norm = self._iter_get_norm()
+                
 
     def _train_for_PIN(self):
         """
@@ -363,7 +366,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         # IN cache residual
         system = self._system()
-
+        prefix = self._solver_info.prefix + self.SOLVER
         ### Step 1 ###
 
         # run inexact newton steps for training
@@ -381,7 +384,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         # if self._iter_count<self.options['number_of_training_newton_steps']:
 
         if system.comm.rank==0 and self._iter_count==0:
-            print(self.SOLVER +" Starting training ")
+            print(prefix+" Starting training ")
 
         self._inexact_newton_iteration()
 
@@ -402,8 +405,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         # Check if convergence is stalled.
         if stall_limit > 0:
             norm_for_stall = rel_IN if train_stall_tol_type == 'rel' else abs_IN
-            norm_diff = np.abs(self.train_stall_norm - norm_for_stall)
-            # print("stall dif: ", norm_diff, train_stall_tol)
+            norm_diff = abs(self.train_stall_norm - norm_for_stall)
             if norm_diff <= train_stall_tol:
                 if self._iter_count >= stall_limit-1:
                     stalled = True
@@ -414,7 +416,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
         if self._iter_count>=self.options['number_of_training_newton_steps']-1 and stalled:
             self._trained_PIN = True
             if system.comm.rank==0:
-                print(self.SOLVER +" Ending training ")
+                
+                print(prefix +" Ending training ")
         if abs_IN < atol or rel_IN < rtol:
             self._trained_PIN = True
             self._preconditioned = True
@@ -433,17 +436,12 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         ### Step 1 ###
 
+        prefix = self._solver_info.prefix + self.SOLVER
         # run inexact newton steps for training
-        # iter = 0
         if self._iter_count_precond<self.options['number_of_training_precond_steps']:
 
-            if system.comm.rank==0 and self._iter_count_precond==0:
-                print(" " + self.SOLVER +" starting precond training ")
-
-            # self._inexact_newton_iteration()
-
             # compute the residuals
-            # self._run_apply()
+            self._run_apply()
 
             # cahce the resd for training
             self.cache_residuals_pin_precond(dim_red_resid)
@@ -455,12 +453,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
             abs_IN = norm
             rel_IN = norm / self.abs0 if self.abs0 != 0.0 else 1.0
-
-
-            if self._iter_count_precond==self.options['number_of_training_precond_steps']-1:
-                self._trained_PIN_precond = True
-                if system.comm.rank==0:
-                    print(" " + self.SOLVER +" ending precond training ")
 
             self._iter_count_precond = self._iter_count_precond + 1
 
@@ -483,9 +475,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
         if not self._trained_PIN:
             self._train_for_PIN()
             return None
-        
-        # self._cache_residuals = np.ndarray(self._cache_residuals)
-        # self._cache_states = np.ndarray(self._cache_states)
 
         system = self._system()
         # self._solver_info.append_subsolver()
@@ -498,22 +487,7 @@ class PreconditionedInexactNewton(NonlinearSolver):
         system._owns_approx_jac = False
 
         try:
-            # system._dresiduals.set_vec(system._residuals)
-            # system._dresiduals *= -1.0
-            # my_asm_jac = self.linear_solver._assembled_jac
-
-            # system._linearize(my_asm_jac, sub_do_ln=do_sub_ln)
-            # if (my_asm_jac is not None and
-            #         system.linear_solver._assembled_jac is not my_asm_jac):
-            #     my_asm_jac._update(system)
-
-            # self._linearize()
-            # self.linear_solver.solve('fwd')
-            # PIN starts
             if not self._preconditioned:
-
-                
-
                 # compute P and Q projectors
                 self.minimize_variance()
 
@@ -521,10 +495,10 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 ### Step 2 ###
                 # call the precondition convergence
                 self._preconditioning_iter()
-            
+                # init_residual = system._residuals.asarray(copy=True)
             # run the inexact newton
             self._inexact_newton_iteration()
-            
+            init_residual = system._residuals.asarray(copy=True)
         finally:
             # Enable local fd
             system._owns_approx_jac = approx_status
@@ -532,6 +506,8 @@ class PreconditionedInexactNewton(NonlinearSolver):
     
     def _preconditioning_iter(self):
         rtol = self.options['precond_rtol']
+        stall_limit = self.options['number_of_training_precond_steps']
+        precond_stall_tol = self.options['precond_stall_tol']
         system = self._system()
         # self._solver_info.append_subsolver()
         do_subsolve = self.options['solve_subsystems'] and not system.under_complex_step and \
@@ -547,27 +523,29 @@ class PreconditionedInexactNewton(NonlinearSolver):
         self.PTP= np.matmul(self._p_residual, self._p_residual.transpose())
 
         # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
-        # init_residual = self._cache_residuals[:,-1]
+
         init_residual = system._residuals.asarray(copy=True)
+        
         # init_states = system._outputs
         projected_approx_residual_init = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
-
         
-        self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+        self.projected_approx_residual = projected_approx_residual_init
         # self._preconditioned = True
-
+        # rel_IN = projected_approx_residual_init / projected_approx_residual_init if self.abs0 != 0.0 else 1.0
         # converge the reduce nonlinear space
         iter=0
         self._iter_count_precond = 0
-        while np.linalg.norm(self.projected_approx_residual) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
-            # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
-            # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
-            
-            if iter==0 and system.comm.rank==0:
-                print(" "+self.SOLVER +" Starting preconditioning")
-            # dimension reduced vector
-
-            
+        prefix = self._solver_info.prefix + self.SOLVER
+        self.precond_stall_norm = 1
+        stalled = False
+        init_precond_norm = np.linalg.norm(projected_approx_residual_init)  if np.linalg.norm(projected_approx_residual_init) != 0.0 else 1
+        while np.linalg.norm(self.projected_approx_residual) > rtol* init_precond_norm and iter < self.options['precond_max_sub_solves']:
+        
+            if iter==0:
+                if system.comm.rank==0:
+                    print(prefix +" Starting preconditioning")
+                    if self.options['solve_subprecond']:
+                        print(prefix +" starting precond training ")       
 
             dimension_reduced_residual = self._p_residual.transpose().dot(self.projected_approx_residual)
 
@@ -596,28 +574,18 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 jac_lup = system.linear_solver._build_mtx()
         
             # P^T x Jac
-            # print(jac_lup.shape,self._p_states.shape)
             p_residual_csc = np.matmul(jac_lup,self._p_states)
-            # P_tranpose_Jac =p_residual_csc.multiply(my_asm_jac)
             # Jp = P^T x Jac x Q
             Jac_p = np.matmul( self._p_residual.transpose(),p_residual_csc )
 
 
             Sub_sol = np.linalg.solve(Jac_p, -dimension_reduced_residual)
-            # system._dresiduals.set_vec(np.asarray(dimension_reduced_residual))
-            # print("Sub_sol ",Sub_sol)
+
             
             if self.linesearchPrecond and not system.under_complex_step:
                 system._doutputs.set_val(self._p_states.dot(Sub_sol))
-                # system._doutputs += self._p_states.dot(Sub_sol)
-                # print("before ",system._outputs.asarray(copy=True))
                 self.linesearchPrecond._do_subsolve = do_subsolve
-                self.linesearchPrecond.solve()
-                # print("after ",system._outputs.asarray(copy=True))
-                # print("Sub_sol ",self._p_states.dot(Sub_sol))
-                # quit()
-
-                    
+                self.linesearchPrecond.solve()                    
             else:
                 system._outputs += self._p_states.dot(Sub_sol)
 
@@ -638,10 +606,27 @@ class PreconditionedInexactNewton(NonlinearSolver):
             init_residual = system._residuals.asarray(copy=True)
             # system._dresiduals.set_vec(system._residuals)
             self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
+            
+             # Check if convergence is stalled.
+            if stall_limit > 0:
+                norm_for_stall = np.linalg.norm(self.projected_approx_residual)/init_precond_norm
+                norm_diff = abs(self.precond_stall_norm - norm_for_stall) 
+                # print("stall dif: ",norm_for_stall , norm_diff, self.precond_stall_norm)
+                if norm_diff <= precond_stall_tol:
+                    if iter >= stall_limit-1:
+                        # stalling. so end the end training
+                        stalled = True
+                else:
+                    self.precond_stall_norm = norm_for_stall
 
             # Call the training function
             if not self._trained_PIN_precond and self.options['solve_subprecond']:
                 self._train_for_PIN_precond(self.projected_approx_residual, system._outputs.asarray(copy=True))
+                if stalled:
+                    self._trained_PIN_precond = True
+                    if system.comm.rank==0:
+                        print(prefix +" ending precond training ")
+
                 # return None
 
             if not self._preconditioned_precond and self._trained_PIN_precond and self.options['solve_subprecond']:
@@ -649,32 +634,22 @@ class PreconditionedInexactNewton(NonlinearSolver):
                 self.minimize_variance_precond()
                 self._preconditioning_sub_iter()
                 init_residual = system._residuals.asarray()
-                # system._dresiduals.set_vec(system._residuals)
                 self.projected_approx_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
 
             iter = iter + 1
-            if np.linalg.norm(self.projected_approx_residual) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter <= self.options['precond_max_sub_solves']:
+            if np.linalg.norm(self.projected_approx_residual) <= rtol*init_precond_norm and iter <= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print(" "+self.SOLVER +" preconditioned converged")
-                # if self.linesearch.SOLVER=='LS: AG':
-                    
-                #     if 2*self.linesearch.options["rho"] < 0.5:
-                #         self.linesearch.options["rho"] = 2*self.linesearch.options["rho"]
-                #     else:
-                #         self.linesearch.options["rho"] = 0.5
-                #     if system.comm.rank==0:
-                #         print(" "+self.SOLVER +f" updating LS: AG 'rho={self.linesearch.options['rho']}' for acceleration")
+                    print(prefix +" preconditioned converged")
+
             elif iter >= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print(" "+self.SOLVER +" preconditioned did not converged")
+                    print(prefix +" preconditioned did not converged")
                     msg = (f"Solver '{self.SOLVER}' preconditioned on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
                     self.report_failure(msg)
             system._owns_approx_jac = approx_status
         self._preconditioned=True
-        # approx_status = system._owns_approx_jac
-        # system._owns_approx_jac = approx_status
-        # print("done", self.projected_approx_residual, projected_approx_residual_init)
+
             
 
     def _preconditioning_sub_iter(self):
@@ -696,27 +671,21 @@ class PreconditionedInexactNewton(NonlinearSolver):
 
         # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
         init_residual = self._cache_residuals_precond[:,-1]
-        # mean_residuals_precond = self.compute_means(self._cache_residuals_precond)
 
-        # init_residual = system._residuals.asarray(copy=True)
-        # mean_residuals = self.compute_means(self._cache_residuals)
-        # init_residual = self.PTP.dot(init_residual-mean_residuals) + mean_residuals
-        # mean_residuals = self.compute_means(self._cache_residuals_precond)
-        # # system._dresiduals.set_vec(system._residuals)
+
         projected_approx_residual_init = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
-        self.projected_approx_residual_precond = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
-        
-        # self.projected_approx_residual_precond = PTP.dot(init_residual-mean_residuals) + mean_residuals
-        # self._preconditioned = True
+        self.projected_approx_residual_precond = projected_approx_residual_init
 
+        prefix = self._solver_info.prefix + self.SOLVER
         # converge the reduce nonlinear space
+        init_secondprecond_norm = np.linalg.norm(projected_approx_residual_init) if np.linalg.norm(projected_approx_residual_init) != 0.0 else 1
         iter=0
-        while np.linalg.norm(self.projected_approx_residual_precond) > rtol*np.linalg.norm(projected_approx_residual_init) and iter < self.options['precond_max_sub_solves']:
+        while np.linalg.norm(self.projected_approx_residual_precond) > rtol* init_secondprecond_norm and iter < self.options['precond_max_sub_solves']:
             # resdiual subspace projector f(Y_j) = PP^T(F(Y_j)-F_mean) + F_mean
             # projected_approx_residual = PTP.dot(init_residual-mean_residuals) + mean_residuals
             
             if iter==0 and system.comm.rank==0:
-                print("  " + self.SOLVER +" starting sublevel preconditioning")
+                print(prefix + " starting sublevel preconditioning")
             # dimension reduced vector
 
             
@@ -804,13 +773,13 @@ class PreconditionedInexactNewton(NonlinearSolver):
             self.projected_approx_residual_precond = PTPcond.dot(init_residual-mean_residuals_precond) + mean_residuals_precond
 
             iter = iter + 1
-            if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*np.linalg.norm(projected_approx_residual_init) and iter <= self.options['precond_max_sub_solves']:
+            if np.linalg.norm(self.projected_approx_residual_precond) <= rtol*init_secondprecond_norm and iter <= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print("  " + self.SOLVER +" preconditioned sublevel converged")
-                    
-            elif np.linalg.norm(self.projected_approx_residual_precond) > rtol*np.linalg.norm(projected_approx_residual_init) and iter >= self.options['precond_max_sub_solves']:
+                    print(prefix +" preconditioned sublevel converged")
+
+            elif np.linalg.norm(self.projected_approx_residual_precond) > rtol*init_secondprecond_norm and iter >= self.options['precond_max_sub_solves']:
                 if system.comm.rank==0:
-                    print(self.SOLVER +" preconditioned sublevel did not converged")
+                    print(prefix +" preconditioned sublevel did not converged")
                     msg = (f"Solver '{self.SOLVER}' preconditioned sublevel on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
                     self.report_failure(msg)
@@ -950,9 +919,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
         mean_residuals = self.compute_means(self._cache_residuals)
         mean_centered_residuals = self.compute_centered_solution(self._cache_residuals,mean_residuals)
         p_residual, p_sing, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
-        # print("singular",s)
-        # Compute the rank of the matrix
-        # rank1 = np.linalg.matrix_rank(mean_centered_residuals)
         
 
         # svd on states
@@ -960,25 +926,9 @@ class PreconditionedInexactNewton(NonlinearSolver):
         mean_centered_states = self.compute_centered_solution(self._cache_states,mean_states)
         p_states, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
 
-        # Compute the rank of the matrix
-        # rank2 = np.linalg.matrix_rank(mean_centered_states)
-        # np.set_printoptions(threshold=np.inf)
-        # print('sing p ',p_sing)
-        # print('sing q ',q_sing)
-        # quit()
-        # nmodes = self.options['number_of_preocnditioner_mode']
-        # rank=max(rank1,rank2)
-        # print("rank",rank1,rank2)
-
-        # if nmodes<len(p_residual[0,:]):
-        #     self._p_residual = p_residual[:,:nmodes]
-        # else:
-        # self._p_residual,_ = np.linalg.qr(p_residual[:,:nmodes].transpose())
+    
         self._p_residual = p_residual
-        # if nmodes<len(p_residual[0,:]):
-        #     self._p_states = p_states[:,:nmodes]
-        # else:
-        # self._p_states,_ = np.linalg.qr(p_states[:,:nmodes])
+
         self._p_states = p_states
 
 
@@ -994,9 +944,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
         mean_centered_residuals = self.compute_centered_solution(self._cache_residuals_precond,mean_residuals)
         p_residual_precond, _, _ = np.linalg.svd(mean_centered_residuals, full_matrices=True)
 
-        # Compute the rank of the matrix
-        # rank1 = np.linalg.matrix_rank(mean_centered_residuals)
-        nmodes = self.options['number_of_subpreocnditioner_mode']
         
 
         # svd on states
@@ -1004,16 +951,6 @@ class PreconditionedInexactNewton(NonlinearSolver):
         mean_centered_states = self.compute_centered_solution(self._cache_states_precond,mean_states)
         p_states_precond, _, _ = np.linalg.svd(mean_centered_states, full_matrices=True)
 
-        # Compute the rank of the matrix
-        # rank2 = np.linalg.matrix_rank(mean_centered_states)
-        # rank=max(rank1,rank2)
-
-        # if nmodes<len(p_residual_precond[0,:]):
-        #     self._p_residual_precond = p_residual_precond[:,:nmodes]
-        # else:
         self._p_residual_precond = p_residual_precond
 
-        # if nmodes<len(p_residual_precond[0,:]):
-        #     self._p_states_precond = p_states_precond[:,:nmodes]
-        # else:
         self._p_states_precond = p_states_precond
