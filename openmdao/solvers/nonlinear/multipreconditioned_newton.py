@@ -9,7 +9,7 @@ from openmdao.solvers.linesearch.backtracking import BoundsEnforceLS, ArmijoGold
 from openmdao.solvers.solver import NonlinearSolver
 from openmdao.recorders.recording_iteration_stack import Recording
 from openmdao.utils.mpi import MPI
-
+from openmdao.utils.om_warnings import issue_warning, SolverWarning
 
 class MultiPreconditionedNewton(NonlinearSolver):
     """
@@ -636,7 +636,8 @@ class MultiPreconditionedNewton(NonlinearSolver):
                     print(prefix +" 1st level precondition did not converged")
                     msg = (f"Solver '{self.SOLVER}' 1st level precondition on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
-                    self.report_failure(msg)
+                    # self.report_failure(msg)
+                    issue_warning(msg, category=SolverWarning)
             system._owns_approx_jac = approx_status
         self._preconditioned=True
 
@@ -772,7 +773,8 @@ class MultiPreconditionedNewton(NonlinearSolver):
                     print(prefix +" 2nd level preconditioned did not converged")
                     msg = (f"Solver '{self.SOLVER}' 2nd level on system '{system.pathname}' stalled after "
                 f"{iter} iterations.")
-                    self.report_failure(msg)
+                    # self.report_failure(msg)
+                    issue_warning(msg, category=SolverWarning)
             system._owns_approx_jac = approx_status
         self._preconditioned_precond=True
         
