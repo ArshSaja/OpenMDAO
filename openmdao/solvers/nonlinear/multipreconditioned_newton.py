@@ -640,6 +640,7 @@ class MultiPreconditionedNewton(NonlinearSolver):
                     issue_warning(msg, category=SolverWarning)
             system._owns_approx_jac = approx_status
         self._preconditioned=True
+        self.del_cached_matrices()
 
             
 
@@ -946,3 +947,20 @@ class MultiPreconditionedNewton(NonlinearSolver):
         self._p_residual_precond = p_residual_precond
 
         self._p_states_precond = p_states_precond
+    
+    def del_cached_matrices(self):
+
+        del self._cache_residuals
+        del self._cache_states
+
+        del self._cache_residuals_precond
+        del self._cache_states_precond
+
+        del self.PTP
+        # del self._p_states
+
+        del self._p_residual
+        del self._p_states
+
+        del self._p_residual_precond
+        del self._p_states_precond
