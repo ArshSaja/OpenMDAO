@@ -243,6 +243,21 @@ class MultiPreconditionedNewton(NonlinearSolver):
         self._preconditioned_precond = False
         self._trained_PIN_precond = False
 
+        self._cache_residuals= None
+        self._cache_states= None
+
+        self._cache_residuals_precond= None
+        self._cache_states_precond= None
+
+        self.PTP= None
+        # del self._p_states
+
+        self._p_residual= None
+        self._p_states= None
+
+        self._p_residual_precond= None
+        self._p_states_precond= None
+
         system = self._system()
         solve_subsystems = self.options['solve_subsystems'] and not system.under_complex_step
 
@@ -949,18 +964,22 @@ class MultiPreconditionedNewton(NonlinearSolver):
         self._p_states_precond = p_states_precond
     
     def del_cached_matrices(self):
-
-        del self._cache_residuals
-        del self._cache_states
-
-        del self._cache_residuals_precond
-        del self._cache_states_precond
-
-        del self.PTP
-        # del self._p_states
-
-        del self._p_residual
-        del self._p_states
-
-        del self._p_residual_precond
-        del self._p_states_precond
+        if self._cache_residuals is not None:
+            del self._cache_residuals
+        if self._cache_states is not None:
+            del self._cache_states
+        if self._cache_residuals_precond is not None:
+            del self._cache_residuals_precond
+        if self._cache_states_precond is not None:
+            del self._cache_states_precond
+        if self.PTP is not None:
+            del self.PTP
+            # del self._p_states
+        if self._p_residual is not None:
+            del self._p_residual
+        if self._p_states is not None:
+            del self._p_states
+        if self._p_residual_precond is not None:
+            del self._p_residual_precond
+        if self._p_states_precond is not None:
+            del self._p_states_precond
